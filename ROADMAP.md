@@ -23,7 +23,12 @@ ever sees placeholders.
 - Prior art: [claude-code-redact](https://github.com/paroque28/claude-code-redact)
   does this round-trip with an in-memory map.
 
-### 2. Homebrew install
+### 2. ~~Homebrew install~~ — shipped
+`brew install cupofgeo/tap/llm-redact-proxy` (tap: CupOfGeo/homebrew-tap;
+formula installs into a libexec venv via pip — hermetic per-resource
+pinning was skipped because `mlx` ships wheels only, tagged per macOS).
+Original notes:
+
 `brew install llm-redact-proxy` (own tap first: `CupOfGeo/homebrew-tap`).
 - Formula wraps the Python package; `brew services start llm-redact-proxy`
   replaces `just proxy-install` (brew services manages the launchd plist).

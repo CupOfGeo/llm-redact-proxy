@@ -19,18 +19,20 @@ Requires Apple Silicon (the OPF model runs via MLX).
 
 ## Install
 
-Homebrew formula coming (see ROADMAP). Until then, from a checkout:
+```bash
+brew install cupofgeo/tap/llm-redact-proxy
+redact-proxy setup                          # 1.4 GB model download, config, Claude Code routing
+brew services start llm-redact-proxy        # login service (auto-restarts)
+redact-proxy doctor                         # everything green?
+```
+
+From a checkout instead (development):
 
 ```bash
 git clone https://github.com/CupOfGeo/llm-redact-proxy && cd llm-redact-proxy
 uv sync
-uv run redact-proxy setup      # 1.4 GB model download, config file, Claude Code routing
-just proxy-install             # login service via launchd (auto-restarts)
-uv run redact-proxy doctor     # everything green?
+uv run redact-proxy setup && just proxy-install && uv run redact-proxy doctor
 ```
-
-`uv tool install .` puts `redact-proxy` on your PATH so you can drop the
-`uv run` prefix.
 
 ## Usage
 

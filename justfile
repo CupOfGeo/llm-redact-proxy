@@ -51,3 +51,15 @@ proxy-uninstall:
     launchctl bootout "gui/$(id -u)/com.llm.redact-proxy" 2>/dev/null || true
     rm -f "$HOME/Library/LaunchAgents/com.llm.redact-proxy.plist"
     @echo "Uninstalled."
+
+# Cut a release: bump nothing here — pyproject version is the source of truth.
+# Tags, pushes, and prints the tarball sha256 for the tap formula.
+release:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    v=$(uv run python -c "import tomllib;print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+    git diff --quiet || { echo "working tree dirty"; exit 1; }
+    uv run pytest -q && uvx pre-commit run --all-files
+    git tag "v$v" && git push origin main "v$v"
+    echo "sha256 for Formula/llm-redact-proxy.rb:"
+    curl -sL "https://github.com/CupOfGeo/llm-redact-proxy/archive/refs/tags/v$v.tar.gz" | shasum -a 256
