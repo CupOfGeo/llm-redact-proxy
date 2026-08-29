@@ -17,31 +17,76 @@ Claude Code ──http──▶ llm-redact-proxy (127.0.0.1:8787) ──https─
 
 Requires Apple Silicon (the OPF model runs via MLX).
 
+## Install
+
+Homebrew formula coming (see ROADMAP). Until then, from a checkout:
+
+```bash
+git clone https://github.com/CupOfGeo/llm-redact-proxy && cd llm-redact-proxy
+uv sync
+uv run redact-proxy setup      # 1.4 GB model download, config file, Claude Code routing
+just proxy-install             # login service via launchd (auto-restarts)
+uv run redact-proxy doctor     # everything green?
+```
+
+`uv tool install .` puts `redact-proxy` on your PATH so you can drop the
+`uv run` prefix.
+
 ## Usage
 
-One-off (foreground):
-
-```bash
-just proxy                                        # loads model, listens on :8787
-ANTHROPIC_BASE_URL=http://127.0.0.1:8787 claude   # in another terminal
+```
+redact-proxy setup             # first run: model, config, routing
+redact-proxy run               # foreground proxy (what the service runs)
+redact-proxy status [--json]   # exit 0 ready · 1 down · 2 loading · 3 error
+redact-proxy doctor [--fix]    # platform, model, service, routing, stray services
+redact-proxy route [--off]     # (un)route Claude Code via ~/.claude/settings.json
+redact-proxy logs [-f]
+redact-proxy config [get KEY | set KEY VALUE | init | path]
+redact-proxy shellenv          # optional fail-closed `claude` shell wrapper
+redact-proxy hook-snippet      # optional SessionStart warning hook
 ```
 
-As a login service (starts at login, auto-restarts via launchd):
+### Routing Claude Code
 
-```bash
-just proxy-install     # writes ~/Library/LaunchAgents/com.llm.redact-proxy.plist
-just proxy-status      # health check
-just proxy-uninstall
+`redact-proxy route` writes `ANTHROPIC_BASE_URL` (and `ENABLE_TOOL_SEARCH`)
+into the `env` block of `~/.claude/settings.json`. Claude Code applies that
+block to **every** session — CLI, desktop app, IDE extensions — and it wins
+over the shell environment, so nothing depends on which terminal you
+launched from. It is fail-closed by construction: if the proxy is down,
+Claude Code gets *connection refused*, never an unredacted request. A
+timestamped backup of `settings.json` is kept beside it; `route --off`
+removes exactly the keys it added.
+
+Two documented side effects of a non-Anthropic base URL: Remote Control is
+disabled while routed, and MCP tool search would be disabled were it not
+for the `ENABLE_TOOL_SEARCH=true` we set alongside. Restart running
+sessions after routing.
+
+Prefer a hard gate with a readable message? `eval "$(redact-proxy
+shellenv)"` in your zshrc defines a `claude` function that refuses to
+start while the proxy is down or still loading, plus a `claude-raw`
+bypass — note the bypass only works when you rely on the wrapper alone:
+once routed via settings.json, that env block wins over the shell, and
+un-routing takes `redact-proxy route --off`. `redact-proxy hook-snippet` prints a
+`SessionStart` hook that warns inside the session; hooks can warn but not
+block, so it is advisory.
+
+### Configuration
+
+`~/.config/llm-redact-proxy/config.toml` (`redact-proxy config init`):
+
+```toml
+port = 8787
+upstream = "https://api.anthropic.com"
+categories = ["account_number", "secret"]   # + person, email, phone, address, date, url
+unredact = true                             # false = awareness mode
+model = "OpenMed/privacy-filter-mlx-8bit"
+log_file = "~/Library/Logs/redact-proxy.log"
 ```
 
-Fail-closed shell wrapper — plain `claude` routes through the proxy and
-refuses to run (with a clear error) when the proxy is down; `claude-raw`
-is the deliberate unprotected bypass:
-
-```zsh
-# in your zshrc
-source ~/Code/llm-redact-proxy/claude-wrapper.zsh
-```
+`OPF_PROXY_PORT`, `OPF_PROXY_UPSTREAM`, `OPF_PROXY_CATEGORIES`,
+`OPF_PROXY_UNREDACT`, `OPF_PROXY_MODEL`, `OPF_PROXY_LOG_FILE` override the
+file; `run` flags override both. Restart the service after changes.
 
 ## Design notes
 
@@ -60,9 +105,7 @@ source ~/Code/llm-redact-proxy/claude-wrapper.zsh
 - **Nothing sensitive is logged** — categories and counts only.
 - Default categories are `secret` and `account_number`. Person/email/date
   are deliberately not redacted (that would cripple ordinary coding work).
-  Override with `OPF_PROXY_CATEGORIES`, comma-separated from: `secret`,
-  `account_number`, `person`, `email`, `phone`, `address`, `date`, `url` —
-  e.g. `OPF_PROXY_CATEGORIES=secret just proxy`.
+  Set `categories` in the config file to change that.
   The regex floor for known token formats always runs regardless.
 
 ## Un-redaction, and the threat model
@@ -76,7 +119,7 @@ while the API only ever sees placeholders. Round trips are stable: a value
 read back from disk re-redacts to the identical placeholder, so the
 API-side conversation and prompt cache never change.
 
-**On by default.** `OPF_PROXY_UNREDACT=0` gives *awareness mode*: you see
+**On by default.** `unredact = false` in the config (or `OPF_PROXY_UNREDACT=0`) gives *awareness mode*: you see
 exactly what the model saw.
 
 Threat model, plainly: un-redaction makes the proxy a rehydration oracle for
@@ -104,8 +147,8 @@ are not restored.
   sees the whole text).
 - The raw secret does reach the local Claude Code process — it is scrubbed
   from the copy sent to the API. The model may visibly see placeholders.
-- Env-based `ANTHROPIC_BASE_URL` can change how the CLI picks its auth
-  source (it warns about claude.ai connectors); check your login flow.
+- Routing disables Claude Code's Remote Control (a documented effect of any
+  non-Anthropic base URL). `redact-proxy route --off` restores it.
 
 ## Roadmap
 

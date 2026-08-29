@@ -72,7 +72,7 @@ Log what would have caught it, without ever logging a value:
 
 ### 5. Smaller ideas
 - `gitleaks` pre-commit hook in this repo (eat own dog food).
-- Config file (`~/.config/llm-redact-proxy.toml`) instead of env vars only.
+- ~~Config file instead of env vars only~~ — shipped (`~/.config/llm-redact-proxy/config.toml`).
 - Optional response-side scanning (model echoing a secret it inferred).
 - Stats endpoint (`/stats`): cumulative redaction counts by category.
 - Non-Apple-Silicon fallback: regex floor only, model layer off, so Linux

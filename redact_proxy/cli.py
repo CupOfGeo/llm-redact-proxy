@@ -12,6 +12,8 @@ import click
 import httpx
 
 from redact_proxy import config as cfgmod
+from redact_proxy import doctor as doctormod
+from redact_proxy import routing
 from redact_proxy.config import Config
 
 try:
@@ -207,6 +209,163 @@ claude-raw() {{ command claude "$@"; }}
 def shellenv() -> None:
     """Print a fail-closed `claude` shell wrapper: eval "$(redact-proxy shellenv)"."""
     click.echo(SHELLENV.format(base_url=load_config().base_url), nl=False)
+
+
+def _route_on(cfg: Config, force: bool) -> None:
+    path = routing.settings_path()
+    try:
+        result = routing.route_on(path, cfg.base_url, force=force)
+    except routing.RouteConflict as exc:
+        raise click.ClickException(str(exc)) from exc
+    except ValueError as exc:
+        raise click.ClickException(f"{path}: {exc}") from exc
+    if result.changed:
+        click.echo(f"routed: {path} env.ANTHROPIC_BASE_URL = {cfg.base_url}")
+        if result.backup:
+            click.echo(f"backup: {result.backup}")
+    else:
+        click.echo(f"already routed via {path}")
+    click.echo(routing.CAVEATS)
+
+
+@cli.command()
+@click.option("--off", is_flag=True, help="Remove the routing this command added.")
+@click.option("--force", is_flag=True, help="Replace a foreign ANTHROPIC_BASE_URL.")
+def route(off: bool, force: bool) -> None:
+    """Route every Claude Code session through the proxy (~/.claude/settings.json)."""
+    cfg = load_config()
+    if not off:
+        _route_on(cfg, force)
+        return
+    path = routing.settings_path()
+    try:
+        result = routing.route_off(path, cfg.base_url)
+    except ValueError as exc:
+        raise click.ClickException(f"{path}: {exc}") from exc
+    if result.changed:
+        click.echo(f"unrouted: removed {', '.join(result.removed)} from {path}")
+        click.echo(f"backup: {result.backup}")
+    elif result.previous:
+        click.echo(
+            f"left alone: ANTHROPIC_BASE_URL={result.previous!r} is not this proxy"
+        )
+    else:
+        click.echo("already unrouted")
+
+
+def download_model(model: str) -> str:
+    from huggingface_hub import snapshot_download
+
+    return snapshot_download(model)
+
+
+@cli.command()
+@click.option("--no-download", is_flag=True, help="Skip the model download.")
+@click.option("--no-route", is_flag=True, help="Don't touch ~/.claude/settings.json.")
+@click.option("--force", is_flag=True, help="Replace a foreign ANTHROPIC_BASE_URL.")
+def setup(no_download: bool, no_route: bool, force: bool) -> None:
+    """First-run: download the model, write config, route Claude Code."""
+    cfg = load_config()
+    if not (
+        doctormod.platform.system() == "Darwin"
+        and doctormod.platform.machine() == "arm64"
+    ):
+        raise click.ClickException(
+            "Apple Silicon Mac required (the OPF model runs on MLX)"
+        )
+    path = cfgmod.config_path()
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(cfg.to_toml())
+        click.echo(f"config: wrote {path}")
+    else:
+        click.echo(f"config: {path}")
+    if no_download:
+        click.echo("model: skipped")
+    elif doctormod.model_cache_dir(cfg.model):
+        click.echo(f"model: {cfg.model} already cached")
+    else:
+        click.echo(f"model: downloading {cfg.model} (~1.4 GB) ...")
+        try:
+            where = download_model(cfg.model)
+        except Exception as exc:
+            raise click.ClickException(f"download failed: {exc}") from exc
+        click.echo(f"model: {where}")
+    if no_route:
+        click.echo("routing: skipped")
+    else:
+        _route_on(cfg, force)
+    click.echo(
+        "\nnext:\n"
+        "  brew services start llm-redact-proxy    # or: redact-proxy run\n"
+        "  redact-proxy doctor"
+    )
+
+
+@cli.command()
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
+@click.option(
+    "--fix", is_flag=True, help="Apply safe fixes (route; remove legacy service)."
+)
+def doctor(as_json: bool, fix: bool) -> None:
+    """Check platform, model, service, and Claude Code routing. Exit 1 on failure."""
+    cfg = load_config()
+    probes = doctormod.Probes(health=fetch_health)
+    checks = doctormod.run_checks(cfg, probes)
+    if fix:
+        fixes = []
+        by_name = {c.name: c for c in checks}
+        if by_name["launchd"].ok is False:
+            fixes += doctormod.remove_legacy_service()
+        if by_name["claude routing"].ok is False and not by_name[
+            "claude routing"
+        ].detail.startswith("ANTHROPIC_BASE_URL points elsewhere"):
+            routing.route_on(routing.settings_path(), cfg.base_url)
+            fixes.append("routed via settings.json")
+        for f in fixes:
+            click.echo(f"fixed: {f}")
+        checks = doctormod.run_checks(cfg, probes)
+    failed = [c for c in checks if c.ok is False]
+    if as_json:
+        click.echo(json.dumps([c.__dict__ for c in checks]))
+    else:
+        for c in checks:
+            click.echo(f"{c.icon} {c.name:<15} {c.detail}")
+            if c.hint and c.ok is False:
+                click.echo(f"   ↳ {c.hint}")
+        click.echo("all good" if not failed else f"{len(failed)} problem(s)")
+    sys.exit(1 if failed else 0)
+
+
+HOOK_SNIPPET = {
+    "hooks": {
+        "SessionStart": [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": (
+                            "redact-proxy status >/dev/null 2>&1 || echo "
+                            "'⛔ redact-proxy is not ready: this session is NOT redacting "
+                            "(run: redact-proxy doctor)'"
+                        ),
+                    }
+                ]
+            }
+        ]
+    }
+}
+
+
+@cli.command("hook-snippet")
+def hook_snippet() -> None:
+    """Print a SessionStart hook that warns when the proxy is down (advisory only)."""
+    click.echo(json.dumps(HOOK_SNIPPET, indent=2))
+    click.echo(
+        "# merge into ~/.claude/settings.json. Hooks can warn but cannot block a "
+        "session; routing itself is fail-closed.",
+        err=True,
+    )
 
 
 def main() -> None:

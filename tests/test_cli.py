@@ -103,3 +103,120 @@ def test_shellenv_uses_configured_port(env) -> None:
     out = invoke("shellenv").output
     assert "ANTHROPIC_BASE_URL=http://127.0.0.1:4242" in out
     assert "claude-raw()" in out
+
+
+@pytest.fixture
+def settings(monkeypatch, tmp_path: Path) -> Path:
+    path = tmp_path / "claude" / "settings.json"
+    monkeypatch.setattr(cli.routing, "settings_path", lambda: path)
+    return path
+
+
+def test_route_on_and_off(env, settings) -> None:
+    res = invoke("route")
+    assert res.exit_code == 0, res.output
+    assert "routed:" in res.output and "Remote Control" in res.output
+    assert (
+        json.loads(settings.read_text())["env"]["ANTHROPIC_BASE_URL"]
+        == "http://127.0.0.1:8787"
+    )
+    assert "already routed" in invoke("route").output
+    res = invoke("route", "--off")
+    assert res.exit_code == 0 and "unrouted:" in res.output
+    assert "env" not in json.loads(settings.read_text())
+    assert "already unrouted" in invoke("route", "--off").output
+
+
+def test_route_conflict_needs_force(env, settings) -> None:
+    settings.parent.mkdir(parents=True)
+    settings.write_text(json.dumps({"env": {"ANTHROPIC_BASE_URL": "https://corp"}}))
+    res = invoke("route")
+    assert res.exit_code != 0 and "--force" in res.output
+    assert invoke("route", "--force").exit_code == 0
+    assert (
+        "left alone" in invoke("route", "--off").output
+        or "unrouted" in invoke("route", "--off").output
+    )
+
+
+def test_setup_downloads_writes_config_and_routes(monkeypatch, env, settings) -> None:
+    monkeypatch.setattr(cli.doctormod.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(cli.doctormod.platform, "machine", lambda: "arm64")
+    monkeypatch.setattr(cli.doctormod, "model_cache_dir", lambda m: None)
+    downloaded = []
+    monkeypatch.setattr(
+        cli, "download_model", lambda m: downloaded.append(m) or "/cache/x"
+    )
+    res = invoke("setup")
+    assert res.exit_code == 0, res.output
+    assert downloaded == ["OpenMed/privacy-filter-mlx-8bit"]
+    assert env.exists() and "port = 8787" in env.read_text()
+    assert (
+        json.loads(settings.read_text())["env"]["ANTHROPIC_BASE_URL"]
+        == "http://127.0.0.1:8787"
+    )
+    assert "redact-proxy doctor" in res.output
+    # second run: cached model, existing config, already routed — no downloads
+    monkeypatch.setattr(cli.doctormod, "model_cache_dir", lambda m: Path("/cache/x"))
+    res = invoke("setup")
+    assert res.exit_code == 0 and downloaded == ["OpenMed/privacy-filter-mlx-8bit"]
+    assert "already cached" in res.output and "already routed" in res.output
+
+
+def test_setup_refuses_non_apple_silicon(monkeypatch, env, settings) -> None:
+    monkeypatch.setattr(cli.doctormod.platform, "machine", lambda: "x86_64")
+    res = invoke("setup", "--no-download", "--no-route")
+    assert res.exit_code != 0 and "Apple Silicon" in res.output
+
+
+def test_doctor_output_and_exit(monkeypatch, env) -> None:
+    from redact_proxy.doctor import Check
+
+    good = [Check("service", True, "ready"), Check("launchd", None, "none")]
+    bad = good + [
+        Check(
+            "claude routing", False, "no ANTHROPIC_BASE_URL", "run: redact-proxy route"
+        )
+    ]
+    monkeypatch.setattr(cli.doctormod, "run_checks", lambda cfg, probes: bad)
+    res = invoke("doctor")
+    assert (
+        res.exit_code == 1
+        and "1 problem" in res.output
+        and "↳ run: redact-proxy route" in res.output
+    )
+    parsed = json.loads(invoke("doctor", "--json").output)
+    assert [c["name"] for c in parsed] == ["service", "launchd", "claude routing"]
+    monkeypatch.setattr(cli.doctormod, "run_checks", lambda cfg, probes: good)
+    res = invoke("doctor")
+    assert res.exit_code == 0 and "all good" in res.output
+
+
+def test_doctor_fix_routes(monkeypatch, env, settings) -> None:
+    from redact_proxy.doctor import Check
+
+    calls = []
+
+    def run_checks(cfg, probes):
+        calls.append(1)
+        routed = settings.exists()
+        return [
+            Check("launchd", None, "x"),
+            Check("claude routing", routed, "...", "run: redact-proxy route"),
+        ]
+
+    monkeypatch.setattr(cli.doctormod, "run_checks", run_checks)
+    res = invoke("doctor", "--fix")
+    assert res.exit_code == 0, res.output
+    assert "fixed: routed" in res.output and settings.exists()
+
+
+def test_hook_snippet_is_valid_json(env) -> None:
+    res = invoke("hook-snippet")
+    assert res.exit_code == 0
+    snippet = json.loads(res.stdout)
+    assert "SessionStart" in snippet["hooks"]
+    assert (
+        "redact-proxy status"
+        in snippet["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+    )

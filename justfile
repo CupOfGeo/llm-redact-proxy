@@ -1,8 +1,19 @@
-# PII-redacting LLM API proxy. Then: ANTHROPIC_BASE_URL=http://127.0.0.1:8787 claude
-proxy:
-    uv run python -m redact_proxy.server
+# PII-redacting LLM API proxy. Everyday driver is the CLI: `redact-proxy --help`
+# (inside this checkout: `uv run redact-proxy ...`).
 
-# Install the proxy as a login service (launchd: starts at login, auto-restarts).
+proxy:
+    uv run redact-proxy run
+
+status:
+    uv run redact-proxy status
+
+doctor:
+    uv run redact-proxy doctor
+
+test:
+    uv run pytest -q
+
+# Login service via launchd (auto-restarts); interim until `brew services` takes over.
 proxy-install:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -16,9 +27,8 @@ proxy-install:
       <key>Label</key><string>com.llm.redact-proxy</string>
       <key>ProgramArguments</key>
       <array>
-        <string>{{justfile_directory()}}/.venv/bin/python</string>
-        <string>-m</string>
-        <string>redact_proxy.server</string>
+        <string>{{justfile_directory()}}/.venv/bin/redact-proxy</string>
+        <string>run</string>
       </array>
       <key>WorkingDirectory</key><string>{{justfile_directory()}}</string>
       <key>RunAtLoad</key><true/>
@@ -30,20 +40,14 @@ proxy-install:
     PLIST
     launchctl bootout "gui/$(id -u)/com.llm.redact-proxy" 2>/dev/null || true
     launchctl bootstrap "gui/$(id -u)" "$plist"
-    echo "Installed. Waiting for model load..."
-    for _ in $(seq 1 60); do
-        curl -sf --max-time 1 http://127.0.0.1:8787/health >/dev/null && break
+    echo "Installed. Waiting for the model to load..."
+    for _ in $(seq 1 90); do
+        uv run redact-proxy status >/dev/null 2>&1 && break
         sleep 1
     done
-    just proxy-status
-
-proxy-status:
-    @curl -sf --max-time 2 http://127.0.0.1:8787/health && echo || echo "⛔ redact-proxy is NOT running (log: ~/Library/Logs/redact-proxy.log)"
+    uv run redact-proxy status
 
 proxy-uninstall:
     launchctl bootout "gui/$(id -u)/com.llm.redact-proxy" 2>/dev/null || true
     rm -f "$HOME/Library/LaunchAgents/com.llm.redact-proxy.plist"
     @echo "Uninstalled."
-
-test:
-    uv run pytest -q
