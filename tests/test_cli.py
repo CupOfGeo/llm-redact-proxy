@@ -37,11 +37,11 @@ def test_run_passes_flags_to_serve(monkeypatch, env) -> None:
     seen = {}
     monkeypatch.setattr(server, "serve", lambda cfg: seen.update(cfg=cfg))
     res = invoke(
-        "run", "--port", "9999", "--no-unredact", "--categories", "secret,email"
+        "run", "--port", "9999", "--unredact", "hook", "--categories", "secret,email"
     )
     assert res.exit_code == 0, res.output
     assert seen["cfg"].port == 9999
-    assert seen["cfg"].unredact is False
+    assert seen["cfg"].unredact == "hook"
     assert seen["cfg"].categories == frozenset({"secret", "email"})
 
 

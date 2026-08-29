@@ -36,9 +36,10 @@ _CONFIG_OPTS = [
         help="debug adds per-redaction and per-chunk OPF events.",
     ),
     click.option(
-        "--unredact/--no-unredact",
-        default=None,
-        help="Restore real values in responses (default on; off = awareness mode).",
+        "--unredact",
+        type=click.Choice(["stream", "hook", "off"]),
+        help="stream: restore in responses; hook: restore at tool execution "
+        "via the plugin; off: awareness mode.",
     ),
 ]
 
@@ -108,9 +109,7 @@ def status(as_json: bool, port: int | None) -> None:
     )
     click.echo(f"   model:      {health.get('model')}")
     click.echo(f"   categories: {', '.join(health.get('categories', []))}")
-    click.echo(
-        f"   unredact:   {'on' if health.get('unredact') else 'off (awareness mode)'}"
-    )
+    click.echo(f"   unredact:   {health.get('unredact', '?')}")
     click.echo(f"   upstream:   {health.get('upstream')}")
     if health.get("load_error"):
         click.echo(f"   error:      {health['load_error']}")

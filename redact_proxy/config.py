@@ -45,7 +45,7 @@ class Config:
     port: int = DEFAULT_PORT
     upstream: str = DEFAULT_UPSTREAM
     categories: frozenset[str] = field(default_factory=lambda: DEFAULT_CATEGORIES)
-    unredact: bool = True
+    unredact: str = "stream"  # stream | hook | off (bools coerce for compat)
     model: str = DEFAULT_MODEL
     log_file: str = DEFAULT_LOG_FILE
     log_level: str = "info"  # debug adds per-redaction and per-chunk events
@@ -65,7 +65,7 @@ class Config:
             f"port = {self.port}\n"
             f'upstream = "{self.upstream}"\n'
             f"categories = [{cats}]\n"
-            f"unredact = {'true' if self.unredact else 'false'}\n"
+            f'unredact = "{self.unredact}"\n'
             f'model = "{self.model}"\n'
             f'log_file = "{self.log_file}"\n'
             f'log_level = "{self.log_level}"\n'
@@ -84,9 +84,14 @@ def _coerce(key: str, value: Any) -> Any:
             value = value.split(",")
         return frozenset(c.strip() for c in value if str(c).strip())
     if key == "unredact":
-        if isinstance(value, str):
-            return value.strip().lower() not in {"0", "false", "no", "off", ""}
-        return bool(value)
+        if isinstance(value, bool):  # pre-0.4 TOML booleans
+            return "stream" if value else "off"
+        v = str(value).strip().lower()
+        if v in {"1", "true", "yes", "on"}:
+            return "stream"
+        if v in {"0", "false", "no", ""}:
+            return "off"
+        return v
     return str(value)
 
 
@@ -97,6 +102,8 @@ def _validate(cfg: Config) -> Config:
         raise ValueError(f"upstream must be an http(s) URL: {cfg.upstream!r}")
     if not cfg.categories:
         raise ValueError("categories must not be empty")
+    if cfg.unredact not in ("stream", "hook", "off"):
+        raise ValueError(f"unredact must be stream/hook/off: {cfg.unredact!r}")
     if cfg.log_level not in ("debug", "info", "warning", "error"):
         raise ValueError(
             f"log_level must be debug/info/warning/error: {cfg.log_level!r}"

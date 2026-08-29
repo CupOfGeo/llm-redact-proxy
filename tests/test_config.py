@@ -14,7 +14,8 @@ from redact_proxy.redactor import DEFAULT_CATEGORIES
 def test_defaults_without_file(tmp_path: Path) -> None:
     cfg = cfgmod.load(path=tmp_path / "missing.toml", env={})
     assert cfg == Config()
-    assert cfg.port == 8787 and cfg.unredact and cfg.categories == DEFAULT_CATEGORIES
+    assert cfg.port == 8787 and cfg.unredact == "stream"
+    assert cfg.categories == DEFAULT_CATEGORIES
     assert cfg.base_url == "http://127.0.0.1:8787"
 
 
@@ -24,7 +25,7 @@ def test_file_values(tmp_path: Path) -> None:
     cfg = cfgmod.load(path=f, env={})
     assert cfg.port == 9000
     assert cfg.categories == frozenset({"secret", "person"})
-    assert cfg.unredact is False
+    assert cfg.unredact == "off"  # TOML boolean false coerces
     assert cfg.upstream == "https://api.anthropic.com"  # untouched default
 
 
@@ -33,18 +34,31 @@ def test_env_beats_file_and_override_beats_env(tmp_path: Path) -> None:
     f.write_text("port = 9000\n")
     env = {"OPF_PROXY_PORT": "9001", "OPF_PROXY_UNREDACT": "0"}
     assert cfgmod.load(path=f, env=env).port == 9001
-    assert cfgmod.load(path=f, env=env).unredact is False
+    assert cfgmod.load(path=f, env=env).unredact == "off"
     cfg = cfgmod.load(path=f, env=env, port=9002, unredact=None)  # None = skip
-    assert cfg.port == 9002 and cfg.unredact is False
+    assert cfg.port == 9002 and cfg.unredact == "off"
 
 
 @pytest.mark.parametrize(
     "raw,expected",
-    [("1", True), ("true", True), ("0", False), ("off", False), ("", False)],
+    [
+        ("1", "stream"),
+        ("true", "stream"),
+        ("stream", "stream"),
+        ("hook", "hook"),
+        ("0", "off"),
+        ("off", "off"),
+        ("", "off"),
+    ],
 )
-def test_unredact_env_parsing(raw: str, expected: bool, tmp_path: Path) -> None:
+def test_unredact_env_parsing(raw: str, expected: str, tmp_path: Path) -> None:
     cfg = cfgmod.load(path=tmp_path / "x", env={"OPF_PROXY_UNREDACT": raw})
-    assert cfg.unredact is expected
+    assert cfg.unredact == expected
+
+
+def test_unredact_bad_value_rejected(tmp_path: Path) -> None:
+    with pytest.raises(ValueError):
+        cfgmod.load(path=tmp_path / "x", env={"OPF_PROXY_UNREDACT": "sideways"})
 
 
 def test_categories_csv_env(tmp_path: Path) -> None:
@@ -66,7 +80,7 @@ def test_validation_errors(content: str, tmp_path: Path) -> None:
 
 
 def test_to_toml_round_trips(tmp_path: Path) -> None:
-    cfg = Config(port=1234, categories=frozenset({"secret", "phone"}), unredact=False)
+    cfg = Config(port=1234, categories=frozenset({"secret", "phone"}), unredact="hook")
     f = tmp_path / "c.toml"
     f.write_text(cfg.to_toml())
     assert cfgmod.load(path=f, env={}) == cfg

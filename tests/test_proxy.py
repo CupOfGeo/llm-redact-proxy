@@ -36,7 +36,7 @@ async def test_health_is_never_proxied(proxy_client, upstream) -> None:
     resp = await proxy_client.get("/health")
     assert resp.status_code == 200
     assert resp.json()["status"] == "ok"
-    assert resp.json()["unredact"] is True
+    assert resp.json()["unredact"] == "stream"
     assert upstream.requests == []
 
 
@@ -83,7 +83,7 @@ async def test_non_streaming_unknown_placeholder_untouched(
 async def test_awareness_mode_flag_off(proxy_client, upstream, monkeypatch) -> None:
     from redact_proxy import server
 
-    monkeypatch.setattr(server, "UNREDACT", False)
+    monkeypatch.setattr(server, "UNREDACT", "off")
     upstream.response = echo_placeholder_response(f"run: {GH_PLACEHOLDER}")
     resp = await proxy_client.post(
         "/v1/messages", json=message_body(f"my token {GH_TOKEN}")
@@ -185,7 +185,7 @@ async def test_sse_awareness_mode_byte_identical(
 ) -> None:
     from redact_proxy import server
 
-    monkeypatch.setattr(server, "UNREDACT", False)
+    monkeypatch.setattr(server, "UNREDACT", "off")
     chunks, events = sse_with_placeholder()
     upstream.sse(chunks)
     resp = await proxy_client.post(
@@ -320,3 +320,71 @@ async def test_model_load_failure_reported(proxy_client, upstream) -> None:
         "RuntimeError"
     )
     assert isinstance(health["pid"], int)
+
+
+def auth_header() -> dict:
+    import hashlib
+
+    from redact_proxy.redactor import install_key
+
+    return {"x-redact-auth": hashlib.sha256(install_key()).hexdigest()}
+
+
+async def test_restore_endpoint_auth(proxy_client, upstream) -> None:
+    body = {"input": "x"}
+    assert (await proxy_client.post("/restore", json=body)).status_code == 401
+    bad = {"x-redact-auth": "0" * 64}
+    assert (
+        await proxy_client.post("/restore", json=body, headers=bad)
+    ).status_code == 401
+    ok = await proxy_client.post("/restore", json=body, headers=auth_header())
+    assert ok.status_code == 200
+    assert (
+        await proxy_client.post(
+            "/restore", json=["no-input-key"], headers=auth_header()
+        )
+    ).status_code == 400
+    assert upstream.requests == []  # never proxied
+
+
+async def test_restore_endpoint_round_trip(proxy_client, upstream) -> None:
+    # Outbound request records the reverse mapping...
+    await proxy_client.post("/v1/messages", json=message_body(f"tok {GH_TOKEN}"))
+    unknown = _placeholder("secret", "never-sent-outbound")
+    payload = {
+        "tool": "Bash",
+        "input": {
+            "command": f"deploy --key {GH_PLACEHOLDER}",
+            "args": [GH_PLACEHOLDER, unknown],
+            "nested": {"note": "no placeholder here"},
+        },
+    }
+    resp = await proxy_client.post("/restore", json=payload, headers=auth_header())
+    data = resp.json()
+    assert data["input"]["command"] == f"deploy --key {GH_TOKEN}"
+    assert data["input"]["args"] == [GH_TOKEN, unknown]  # unknown untouched
+    assert data["restored"] == 2 and data["unknown"] == 1
+
+
+async def test_hook_mode_passes_responses_through(
+    proxy_client, upstream, monkeypatch
+) -> None:
+    from redact_proxy import server
+
+    monkeypatch.setattr(server, "UNREDACT", "hook")
+    # SSE byte-identical even though the reverse map knows the value:
+    chunks, events = sse_with_placeholder()
+    upstream.sse(chunks)
+    resp = await proxy_client.post(
+        "/v1/messages", json=message_body(f"my token {GH_TOKEN}")
+    )
+    assert resp.content == events
+    # Non-streaming body keeps placeholders too:
+    upstream.response = echo_placeholder_response(f"run: {GH_PLACEHOLDER}")
+    resp = await proxy_client.post("/v1/messages", json=message_body("hi"))
+    assert resp.json()["content"][0]["text"] == f"run: {GH_PLACEHOLDER}"
+    # ...but /restore still resolves (that's the hook's job now):
+    resp = await proxy_client.post(
+        "/restore", json={"input": GH_PLACEHOLDER}, headers=auth_header()
+    )
+    assert resp.json()["input"] == GH_TOKEN

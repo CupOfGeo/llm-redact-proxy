@@ -16,8 +16,10 @@ logged — only categories and counts.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
+import re
 import sys
 import time
 from contextlib import asynccontextmanager
@@ -30,7 +32,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from redact_proxy import config, log
 from redact_proxy.config import Config
-from redact_proxy.redactor import Redactor
+from redact_proxy.redactor import PLACEHOLDER_RE, Redactor, install_key
 from redact_proxy.unredact import SSERestorer
 
 # Effective settings (config.toml ← OPF_PROXY_* env). Kept as module
@@ -38,11 +40,13 @@ from redact_proxy.unredact import SSERestorer
 CONFIG = config.load()
 UPSTREAM = CONFIG.upstream
 PORT = CONFIG.port
-# Un-redaction: restore real values in responses so files/commands the
-# model writes contain working credentials. ON by default; off is
-# "awareness mode" (you see exactly what the model saw). Trade-off: a
-# prompt-injected model can echo a placeholder into a locally executed
-# tool call and get the real secret restored — see README "Threat model".
+# Un-redaction mode. "stream": restore real values inside responses so
+# files/commands the model writes contain working credentials (trade-off:
+# a prompt-injected model can echo a placeholder into a locally executed
+# tool call and get it restored — see README "Threat model"). "hook":
+# responses pass through with placeholders; the Claude Code PreToolUse
+# hook restores at execution time via POST /restore, under an exfil
+# policy. "off": awareness mode — you see exactly what the model saw.
 UNREDACT = CONFIG.unredact
 
 logger = log.get("server")
@@ -231,7 +235,45 @@ def _restore_body(body: bytes) -> bytes:
         return body
 
 
+def _restore_with_counts(node: Any, counts: dict) -> Any:
+    if isinstance(node, str):
+
+        def sub(m: re.Match) -> str:
+            value = redactor.reverse.get(m.group())
+            counts["restored" if value is not None else "unknown"] += 1
+            return m.group() if value is None else value
+
+        return PLACEHOLDER_RE.sub(sub, node)
+    if isinstance(node, list):
+        return [_restore_with_counts(item, counts) for item in node]
+    if isinstance(node, dict):
+        return {k: _restore_with_counts(v, counts) for k, v in node.items()}
+    return node
+
+
+def _restore_auth_token() -> str:
+    """Same-user gate for /restore: hash of the install key. Cosmetic by
+    design — a local process that can read the key file can read the
+    secrets themselves; this only keeps casual local callers honest."""
+    return hashlib.sha256(install_key()).hexdigest()
+
+
 # Registered before the catch-all so it never proxies upstream.
+@app.post("/restore")
+async def restore(request: Request) -> Response:
+    if request.headers.get("x-redact-auth") != _restore_auth_token():
+        return _error_response(401, "redact-proxy: bad or missing x-redact-auth")
+    try:
+        payload = json.loads(await request.body())
+        assert isinstance(payload, dict) and "input" in payload
+    except Exception:  # noqa: BLE001 - uniform client error
+        return _error_response(400, 'redact-proxy: body must be {"input": ...}')
+    counts = {"restored": 0, "unknown": 0}
+    restored = _restore_with_counts(payload["input"], counts)
+    logger.info("restore", tool=payload.get("tool"), **counts)
+    return JSONResponse({"input": restored, **counts})
+
+
 @app.get("/health")
 async def health() -> dict:
     state = _model_state()
@@ -245,6 +287,7 @@ async def health() -> dict:
         "load_error": redactor.load_error,
         "categories": sorted(redactor.categories),
         "unredact": UNREDACT,
+        "restore_endpoint": True,
         "upstream": UPSTREAM,
     }
 
@@ -325,7 +368,7 @@ async def proxy(request: Request, path: str) -> Response:
     if "text/event-stream" in upstream.headers.get("content-type", ""):
         # Un-redact the stream in place: the map is shared with the request
         # path, so placeholders minted by this or earlier requests resolve.
-        restorer = SSERestorer(redactor.reverse) if UNREDACT else None
+        restorer = SSERestorer(redactor.reverse) if UNREDACT == "stream" else None
 
         async def stream():
             try:
@@ -360,7 +403,7 @@ async def proxy(request: Request, path: str) -> Response:
             status=upstream.status_code,
             body=content[:300].decode("utf-8", "replace"),
         )
-    if UNREDACT:
+    if UNREDACT == "stream":
         content = _restore_body(content)
     return Response(
         content=content, status_code=upstream.status_code, headers=resp_headers
