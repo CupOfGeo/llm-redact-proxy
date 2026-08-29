@@ -4,7 +4,11 @@ Feature ideas and testing backlog. Rough priority order within each section.
 
 ## Features
 
-### 1. Un-redaction round-trip ("hash and unhash")
+### 1. ~~Un-redaction round-trip ("hash and unhash")~~ — shipped
+Done: reverse map in `Redactor`, JSON-aware non-streaming restore, and
+the SSE rewriter in `redact_proxy/unredact.py` (see README "Un-redaction,
+and the threat model"). Original notes kept for the record:
+
 Keep the placeholder → real-value map in proxy memory (never on disk) and
 restore real values in responses on the way back, so files the model writes
 contain working credentials and tools behave normally while the API only

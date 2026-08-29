@@ -27,6 +27,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import Response, StreamingResponse
 
 from redact_proxy.redactor import Redactor
+from redact_proxy.unredact import SSERestorer
 
 UPSTREAM = os.environ.get("OPF_PROXY_UPSTREAM", "https://api.anthropic.com")
 PORT = int(os.environ.get("OPF_PROXY_PORT", "8787"))
@@ -179,15 +180,24 @@ async def proxy(request: Request, path: str) -> Response:
     }
 
     if "text/event-stream" in upstream.headers.get("content-type", ""):
+        # Un-redact the stream in place: the map is shared with the request
+        # path, so placeholders minted by this or earlier requests resolve.
+        restorer = SSERestorer(redactor.reverse) if UNREDACT else None
 
         async def stream():
-            async for chunk in upstream.aiter_bytes():
-                yield chunk
-            await upstream.aclose()
-            print(
-                f"  stream /{path} done in {time.perf_counter() - t1:.1f}s",
-                flush=True,
-            )
+            try:
+                async for chunk in upstream.aiter_bytes():
+                    out = restorer.feed(chunk) if restorer else chunk
+                    if out:
+                        yield out
+                if restorer and (tail := restorer.flush()):
+                    yield tail
+            finally:  # also runs on client disconnect — no leaked upstream
+                await upstream.aclose()
+                print(
+                    f"  stream /{path} done in {time.perf_counter() - t1:.1f}s",
+                    flush=True,
+                )
 
         return StreamingResponse(
             stream(),

