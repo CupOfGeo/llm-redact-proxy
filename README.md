@@ -27,6 +27,11 @@ brew services start llm-redact-proxy        # login service (auto-restarts)
 redact-proxy doctor                         # everything green?
 ```
 
+This runs in **stream mode**: secrets are scrubbed on the way to the model
+and restored in responses. For the stronger **hook mode** — secrets
+restored only at tool execution, under an exfiltration check — also install
+the plugin (see [Hook mode](#hook-mode-guarded-rehydration-the-plugin)).
+
 From a checkout instead (development):
 
 ```bash
