@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from redact_proxy.redactor import CHUNK_CHARS, Redactor, _placeholder
 
 GH_TOKEN = "ghp_" + "A" * 36
@@ -63,16 +61,11 @@ def test_guard_span_covering_placeholder(redactor: Redactor) -> None:
     assert GH_PLACEHOLDER in out
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="known bug: guard misses OPF spans strictly inside a placeholder "
-    "(brackets excluded) — fixed in phase 2",
-)
 def test_guard_span_inside_placeholder(redactor: Redactor) -> None:
     inner = GH_PLACEHOLDER[1:-1]  # placeholder content without the brackets
     redactor._pipe = span_pipe(inner)
     out = redactor.redact(f"token: {GH_TOKEN}")
-    assert GH_PLACEHOLDER in out  # mangled today
+    assert GH_PLACEHOLDER in out
 
 
 def test_cache_hit_and_stats(redactor: Redactor) -> None:
@@ -101,3 +94,52 @@ def test_chunking_offsets() -> None:
     assert "REDACTED:secret:" in out
     # Everything before the marker line is untouched (offset math correct).
     assert out.startswith(filler)
+
+
+def test_reverse_recorded_from_both_layers(redactor: Redactor) -> None:
+    redactor._pipe = span_pipe("hunter2")
+    original = f"token {GH_TOKEN} pass hunter2"
+    out = redactor.redact(original)
+    assert redactor.reverse[GH_PLACEHOLDER] == GH_TOKEN
+    assert redactor.reverse[_placeholder("secret", "hunter2")] == "hunter2"
+    assert redactor.restore(out) == original
+
+
+def test_restore_multiline_pem_round_trip(redactor: Redactor) -> None:
+    pem = "-----BEGIN PRIVATE KEY-----\n" + "A" * 64 + "\n-----END PRIVATE KEY-----"
+    original = f"key:\n{pem}\ndone"
+    out = redactor.redact(original)
+    assert pem not in out
+    assert redactor.restore(out) == original
+
+
+def test_restore_unknown_and_malformed_untouched(redactor: Redactor) -> None:
+    unknown = _placeholder("secret", "never-recorded-value")
+    assert redactor.restore(unknown) == unknown
+    for not_a_placeholder in [
+        "⟨REDACTED:secret:ABCDEF⟩",  # uppercase hex: outside the grammar
+        "⟨REDACTED:secret:abc12⟩",  # hash too short
+        "⟨REDACTED:⟩",
+    ]:
+        assert redactor.restore(not_a_placeholder) == not_a_placeholder
+
+
+def test_reverse_overflow_clears_both(redactor: Redactor, monkeypatch) -> None:
+    import redact_proxy.redactor as rmod
+
+    text = f"token: {GH_TOKEN}"
+    first = redactor.redact(text)
+    assert redactor._cache and redactor.reverse
+    monkeypatch.setattr(rmod, "_REVERSE_MAX", 1)
+    redactor.redact("other secret ghp_" + "B" * 36)
+    assert GH_PLACEHOLDER not in redactor.reverse  # joint clear happened
+    # The cached entry was dropped too, so a rescan repopulates the map:
+    assert redactor.redact(text) == first
+    assert redactor.restore(first) == text
+
+
+def test_cache_only_clear_keeps_restore_working(redactor: Redactor) -> None:
+    original = f"token: {GH_TOKEN}"
+    out = redactor.redact(original)
+    redactor._cache.clear()  # the _CACHE_MAX path clears the cache alone
+    assert redactor.restore(out) == original

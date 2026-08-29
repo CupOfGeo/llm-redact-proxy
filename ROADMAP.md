@@ -38,7 +38,29 @@ Not needed yet, but the repo name leaves room:
 - Rename env vars from `OPF_PROXY_*` to something provider-neutral when
   this lands (keep old names as aliases).
 
-### 4. Smaller ideas
+### 4. Debug logging
+The launchd log (`~/Library/Logs/redact-proxy.log`) is one line per request:
+size, count, timings, status. The Aug 2026 PEM-regex bug (a lazy match
+swallowing 20 `tool_use` blocks, API then rejected the orphaned
+`tool_result`) showed as a normal-looking `[14 REDACTED] … -> 400`.
+Log what would have caught it, without ever logging a value:
+- **Per-redaction metadata**: pattern/category, match *length*, which
+  message/block it landed in. A 50 KB `pem` hit is a red flag on its own.
+- **Structure check**: message count, block count, and the `tool_use` /
+  `tool_use_id` sets before vs after redaction. Log loudly on any
+  difference — and make it a runtime invariant in `_redact_body`, not just
+  a log line (redaction must never change body shape).
+- **Upstream error bodies** on 4xx/5xx (the API's own message, not ours).
+- **Per-chunk OPF timing** — a 574 KB body took 22 s; need to see whether
+  that's a few huge chunks or a cache-miss storm.
+- `OPF_PROXY_LOG_LEVEL` (info default / debug), JSONL records so they're
+  greppable, rotation (current file grows forever and captures tqdm bars).
+- **Body dumps stay a separate, explicit footgun**: `OPF_PROXY_DEBUG_DUMP=<dir>`
+  writes the *redacted* request (what went upstream) and the response.
+  Never the pre-redaction body. Off by default; README must say "this is
+  your whole conversation history on disk".
+
+### 5. Smaller ideas
 - `gitleaks` pre-commit hook in this repo (eat own dog food).
 - Config file (`~/.config/llm-redact-proxy.toml`) instead of env vars only.
 - Optional response-side scanning (model echoing a secret it inferred).

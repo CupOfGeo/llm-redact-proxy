@@ -33,6 +33,13 @@ PORT = int(os.environ.get("OPF_PROXY_PORT", "8787"))
 # Comma-separated OPF categories to redact, e.g. "secret" or
 # "secret,account_number,person". See redactor.DEFAULT_CATEGORIES.
 _CATEGORIES_ENV = os.environ.get("OPF_PROXY_CATEGORIES")
+# Un-redaction: restore real values in responses so files/commands the
+# model writes contain working credentials. ON by default; set
+# OPF_PROXY_UNREDACT=0 for "awareness mode" (you see exactly what the
+# model saw). Trade-off: a prompt-injected model can echo a placeholder
+# into a locally executed tool call and get the real secret restored —
+# see README "Threat model".
+UNREDACT = os.environ.get("OPF_PROXY_UNREDACT", "1") != "0"
 
 # Hop-by-hop / recalculated headers that must not be forwarded verbatim.
 _SKIP_REQ_HEADERS = {"host", "content-length", "connection", "accept-encoding"}
@@ -92,6 +99,35 @@ def _redact_body(body: bytes) -> bytes:
     return text.encode("utf-8")
 
 
+def _restore_node(node: Any) -> Any:
+    if isinstance(node, str):
+        return redactor.restore(node)
+    if isinstance(node, list):
+        return [_restore_node(item) for item in node]
+    if isinstance(node, dict):
+        return {k: _restore_node(v) for k, v in node.items()}
+    return node
+
+
+def _restore_body(body: bytes) -> bytes:
+    """Un-redact a non-streaming JSON response body.
+
+    Walks every string — the placeholder grammar is unambiguous, so no
+    response schema is hardcoded. JSON-aware on purpose: raw byte
+    substitution would corrupt multi-line secrets (PEM) inside JSON
+    strings. Any failure returns the body unchanged: fail toward
+    awareness mode, never toward corrupt output.
+    """
+    try:
+        payload = json.loads(body.decode("utf-8"))
+        restored = _restore_node(payload)
+        return json.dumps(restored, ensure_ascii=False, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    except Exception:  # noqa: BLE001 - see docstring
+        return body
+
+
 # Registered before the catch-all so it never proxies upstream.
 @app.get("/health")
 async def health() -> dict:
@@ -100,6 +136,7 @@ async def health() -> dict:
         "model": redactor.model_id,
         "model_loaded": redactor._pipe is not None,
         "categories": sorted(redactor.categories),
+        "unredact": UNREDACT,
         "upstream": UPSTREAM,
     }
 
@@ -161,6 +198,8 @@ async def proxy(request: Request, path: str) -> Response:
 
     content = await upstream.aread()
     await upstream.aclose()
+    if UNREDACT:
+        content = _restore_body(content)
     return Response(
         content=content, status_code=upstream.status_code, headers=resp_headers
     )

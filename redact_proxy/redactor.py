@@ -77,9 +77,16 @@ TOKEN_PATTERNS = [
     re.compile(  # JWT
         r"\bey[A-Za-z0-9]{17,}\.ey[A-Za-z0-9_/-]{17,}\.[A-Za-z0-9_/-]{10,}={0,2}"
     ),
-    re.compile(  # PEM private key blocks (incl. OPENSSH, PGP)
+    # PEM private key blocks (incl. OPENSSH, PGP). This is the only
+    # multi-line pattern, and it runs over the raw JSON body: the span
+    # must never cross a bare `"` (a JSON string boundary) or an unmatched
+    # BEGIN swallows every message up to the next END — tool_use blocks
+    # included, still as valid JSON. Escapes (\" \\n) are allowed; the
+    # length cap bounds the damage (a 16 KB key does not exist).
+    re.compile(
         r"-----BEGIN[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----"
-        r"[\s\S]{64,}?-----END[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----"
+        r'(?:[^"\\]|\\[\s\S]){64,16000}?'
+        r"-----END[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----"
     ),
     re.compile(  # credentials embedded in URLs: scheme://user:password@host
         r"\b[a-zA-Z][a-zA-Z0-9+.-]{1,20}://[^/\s:@'\"]{1,64}:[^/\s@'\"]{1,128}@"
@@ -90,6 +97,11 @@ TOKEN_PATTERNS = [
 CHUNK_CHARS = 4000
 
 _CACHE_MAX = 8192
+
+# The full placeholder grammar. Unambiguous: nothing else in ordinary
+# text or code produces this shape (see tests/test_patterns.py).
+PLACEHOLDER_RE = re.compile(r"⟨REDACTED:[a-z0-9_]+:[0-9a-f]{6}⟩")
+_REVERSE_MAX = 4096
 
 
 def _placeholder(category: str, value: str) -> str:
@@ -133,6 +145,11 @@ class Redactor:
         # sha256(text) -> redacted text. Conversation history repeats
         # verbatim every request, so this makes scanning incremental.
         self._cache: dict[str, str] = {}
+        # placeholder -> original value, for the response path (restore()).
+        # Memory only, never disk. Clear rule: only ever together with
+        # _cache — a cache hit returns early without re-recording, so
+        # clearing reverse alone strands placeholders in cached history.
+        self.reverse: dict[str, str] = {}
         # Cumulative counters; the server snapshots these per request.
         self.stats = {"cached": 0, "scanned": 0, "redactions": 0}
 
@@ -143,12 +160,28 @@ class Redactor:
         model_path = snapshot_download(self.model_id)
         self._pipe = create_mlx_pipeline(model_path)
 
+    def _record(self, category: str, value: str) -> str:
+        """Placeholder for `value`, remembering the reverse mapping."""
+        placeholder = _placeholder(category, value)
+        self.reverse[placeholder] = value
+        self.stats["redactions"] += 1
+        return placeholder
+
+    def restore(self, text: str) -> str:
+        """Replace known placeholders with their original values.
+
+        Unknown placeholders (e.g. minted before a restart) pass through
+        unchanged — memory-only by design.
+        """
+        return PLACEHOLDER_RE.sub(
+            lambda m: self.reverse.get(m.group(), m.group()), text
+        )
+
     def regex_redact(self, text: str) -> str:
         """Layer 1 only. Safe to run on raw request bytes."""
 
         def replace(m: re.Match) -> str:
-            self.stats["redactions"] += 1
-            return _placeholder("secret", m.group())
+            return self._record("secret", m.group())
 
         for pattern in TOKEN_PATTERNS:
             text = pattern.sub(replace, text)
@@ -181,6 +214,9 @@ class Redactor:
         """Both layers, cached. Returns text with vital PII replaced."""
         if not text:
             return text
+        if len(self.reverse) >= _REVERSE_MAX:
+            self.reverse.clear()
+            self._cache.clear()
         key = hashlib.sha256(text.encode()).hexdigest()
         cached = self._cache.get(key)
         if cached is not None:
@@ -195,20 +231,21 @@ class Redactor:
             ]
             # Replace back-to-front so earlier offsets stay valid; skip overlaps.
             spans.sort(key=lambda s: s["start"], reverse=True)
+            ph_spans = [m.span() for m in PLACEHOLDER_RE.finditer(out)]
             prev_start = len(out) + 1
             for s in spans:
                 if s["end"] > prev_start:
                     continue
                 value = out[s["start"] : s["end"]]
-                # Never re-redact an existing placeholder (regex layer ran first).
-                if "⟨" in value or "⟩" in value:
+                # Never touch an existing placeholder (regex layer ran
+                # first) — including OPF spans strictly *inside* one.
+                if any(s["start"] < pe and s["end"] > ps for ps, pe in ph_spans):
                     continue
                 out = (
                     out[: s["start"]]
-                    + _placeholder(s["category"], value)
+                    + self._record(s["category"], value)
                     + out[s["end"] :]
                 )
-                self.stats["redactions"] += 1
                 prev_start = s["start"]
 
         if len(self._cache) >= _CACHE_MAX:
