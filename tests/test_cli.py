@@ -220,3 +220,46 @@ def test_hook_snippet_is_valid_json(env) -> None:
         "redact-proxy status"
         in snippet["hooks"]["SessionStart"][0]["hooks"][0]["command"]
     )
+
+
+def test_uninstall_removes_everything(monkeypatch, tmp_path, settings) -> None:
+    import subprocess
+
+    # config, key, log all under tmp; routing present to be removed
+    cfg = tmp_path / "config.toml"
+    key = tmp_path / "install.key"
+    logf = tmp_path / "proxy.log"
+    monkeypatch.setenv("OPF_PROXY_CONFIG", str(cfg))
+    monkeypatch.setenv("OPF_PROXY_KEY_FILE", str(key))
+    monkeypatch.setenv("OPF_PROXY_LOG_FILE", str(logf))
+    cfg.write_text("")  # empty = valid TOML
+    key.write_text("k")
+    logf.write_text("log")
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    cli.routing.route_on(settings, "http://127.0.0.1:8787")
+    model_cache = tmp_path / "models--OpenMed--x"
+    model_cache.mkdir()
+    (model_cache / "weights.bin").write_text("blob")
+    monkeypatch.setattr(cli.doctormod, "model_cache_dir", lambda m: model_cache)
+    import shutil
+
+    monkeypatch.setattr(
+        shutil,
+        "which",
+        lambda c: None,
+        raising=False,
+    )
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: None)
+    monkeypatch.setattr(cli.doctormod, "launchd_loaded", lambda label: False)
+
+    res = invoke("uninstall", "--yes")
+    assert res.exit_code == 0, res.output
+    assert not cfg.exists() and not key.exists() and not logf.exists()
+    assert not model_cache.exists()  # model wiped too
+    assert "env" not in json.loads(settings.read_text())  # un-routed
+    assert "brew uninstall llm-redact-proxy" in res.output
+
+
+def test_uninstall_aborts_without_confirm(monkeypatch, env) -> None:
+    res = invoke("uninstall")  # no --yes, no tty input -> abort
+    assert res.exit_code != 0

@@ -13,7 +13,7 @@ import httpx
 
 from redact_proxy import config as cfgmod
 from redact_proxy import doctor as doctormod
-from redact_proxy import routing
+from redact_proxy import grammar, routing
 from redact_proxy.config import Config
 
 try:
@@ -373,6 +373,80 @@ def hook_snippet() -> None:
         "# merge into ~/.claude/settings.json. Hooks can warn but cannot block a "
         "session; routing itself is fail-closed.",
         err=True,
+    )
+
+
+@cli.command()
+@click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
+def uninstall(yes: bool) -> None:
+    """Undo routing, stop the service, and delete all local state.
+
+    Wipes config, the hash key, logs, and the ~1.4 GB model cache — brew
+    uninstall leaves all of that (and the routing) behind. Run this FIRST,
+    while the binary still exists, then `brew uninstall`. Reverses
+    ANTHROPIC_BASE_URL in ~/.claude/settings.json.
+    """
+    import shutil
+    import subprocess
+
+    cfg = load_config()
+    if not yes:
+        click.confirm(
+            "This un-routes Claude Code, stops the service, and deletes the "
+            "config, hash key, logs, and the 1.4 GB model cache. Continue?",
+            abort=True,
+        )
+    done: list[str] = []
+
+    try:
+        result = routing.route_off(routing.settings_path(), cfg.base_url)
+        done.append(
+            "un-routed settings.json: removed "
+            + (
+                ", ".join(result.removed)
+                if result.removed
+                else "nothing (was not routed)"
+            )
+        )
+    except (OSError, ValueError) as exc:
+        done.append(f"routing: could not update settings.json ({exc})")
+
+    if shutil.which("brew"):
+        subprocess.run(
+            ["brew", "services", "stop", "llm-redact-proxy"],
+            capture_output=True,
+            check=False,
+        )
+        done.append("stopped brew service (if it was running)")
+
+    if doctormod.launchd_loaded(doctormod.LEGACY_LABEL):
+        done += doctormod.remove_legacy_service()
+
+    cfg_path = cfgmod.config_path()
+    for f in (cfg_path, grammar._key_file(), cfg.log_path):
+        try:
+            if f.exists():
+                f.unlink()
+                done.append(f"removed {f}")
+        except OSError as exc:
+            done.append(f"could not remove {f} ({exc})")
+    parent = cfg_path.parent
+    if parent.exists() and not any(parent.iterdir()):
+        parent.rmdir()
+        done.append(f"removed {parent}")
+
+    cache = doctormod.model_cache_dir(cfg.model)
+    if cache and cache.exists():
+        shutil.rmtree(cache, ignore_errors=True)
+        done.append(f"removed model cache {cache}")
+
+    for line in done:
+        click.echo(f"  {line}")
+    click.echo("\nto finish removing the package:")
+    click.echo("  in Claude Code:  /plugin uninstall redact-proxy@cupofgeo")
+    click.echo("  brew uninstall llm-redact-proxy && brew untap cupofgeo/tap")
+    click.echo(
+        "  also check your shell rc / login items for a leftover ANTHROPIC_BASE_URL"
     )
 
 
