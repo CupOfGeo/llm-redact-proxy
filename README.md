@@ -20,6 +20,7 @@ Requires Apple Silicon (the OPF model runs via MLX).
 ## Install
 
 ```bash
+brew trust cupofgeo/tap                     # Homebrew 6 requires trusting third-party taps
 brew install cupofgeo/tap/llm-redact-proxy
 redact-proxy setup                          # 1.4 GB model download, config, Claude Code routing
 brew services start llm-redact-proxy        # login service (auto-restarts)
