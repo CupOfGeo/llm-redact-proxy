@@ -178,6 +178,11 @@ class Redactor:
         self.reverse: dict[str, str] = {}
         # Cumulative counters; the server snapshots these per request.
         self.stats = {"cached": 0, "scanned": 0, "redactions": 0}
+        # Set by the server while the model loads in the background;
+        # requests are refused (503) until it clears. load_error keeps
+        # the failure reason for /health.
+        self.loading = False
+        self.load_error: str | None = None
 
     def load(self) -> None:
         from huggingface_hub import snapshot_download

@@ -288,3 +288,35 @@ async def test_upstream_unreachable_is_clean_502(
     assert resp.status_code == 502
     err = resp.json()["error"]
     assert err["type"] == "api_error" and "unreachable" in err["message"]
+
+
+async def test_requests_refused_while_model_loading(proxy_client, upstream) -> None:
+    from redact_proxy import server
+
+    server.redactor.loading = True
+    resp = await proxy_client.post("/v1/messages", json=message_body("hi"))
+    assert resp.status_code == 503
+    assert "loading" in resp.json()["error"]["message"]
+    assert upstream.requests == []
+    health = (await proxy_client.get("/health")).json()
+    assert health["state"] == "loading" and health["status"] == "loading"
+    server.redactor.loading = False
+    assert (
+        await proxy_client.post("/v1/messages", json=message_body("hi"))
+    ).status_code == 200
+    assert (await proxy_client.get("/health")).json()["state"] == "ready"
+
+
+async def test_model_load_failure_reported(proxy_client, upstream) -> None:
+    from redact_proxy import server
+
+    server.redactor.load_error = "RuntimeError: no metal device"
+    resp = await proxy_client.post("/v1/messages", json=message_body("hi"))
+    assert (
+        resp.status_code == 503 and "no metal device" in resp.json()["error"]["message"]
+    )
+    health = (await proxy_client.get("/health")).json()
+    assert health["state"] == "error" and health["load_error"].startswith(
+        "RuntimeError"
+    )
+    assert isinstance(health["pid"], int)

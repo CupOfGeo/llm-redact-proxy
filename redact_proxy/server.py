@@ -15,10 +15,12 @@ logged — only categories and counts.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
 import time
+from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
@@ -26,21 +28,22 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+from redact_proxy import config
+from redact_proxy.config import Config
 from redact_proxy.redactor import Redactor
 from redact_proxy.unredact import SSERestorer
 
-UPSTREAM = os.environ.get("OPF_PROXY_UPSTREAM", "https://api.anthropic.com")
-PORT = int(os.environ.get("OPF_PROXY_PORT", "8787"))
-# Comma-separated OPF categories to redact, e.g. "secret" or
-# "secret,account_number,person". See redactor.DEFAULT_CATEGORIES.
-_CATEGORIES_ENV = os.environ.get("OPF_PROXY_CATEGORIES")
+# Effective settings (config.toml ← OPF_PROXY_* env). Kept as module
+# globals: `serve()` rebinds them from a Config, and tests monkeypatch them.
+CONFIG = config.load()
+UPSTREAM = CONFIG.upstream
+PORT = CONFIG.port
 # Un-redaction: restore real values in responses so files/commands the
-# model writes contain working credentials. ON by default; set
-# OPF_PROXY_UNREDACT=0 for "awareness mode" (you see exactly what the
-# model saw). Trade-off: a prompt-injected model can echo a placeholder
-# into a locally executed tool call and get the real secret restored —
-# see README "Threat model".
-UNREDACT = os.environ.get("OPF_PROXY_UNREDACT", "1") != "0"
+# model writes contain working credentials. ON by default; off is
+# "awareness mode" (you see exactly what the model saw). Trade-off: a
+# prompt-injected model can echo a placeholder into a locally executed
+# tool call and get the real secret restored — see README "Threat model".
+UNREDACT = CONFIG.unredact
 
 # Hop-by-hop / recalculated headers that must not be forwarded verbatim.
 _SKIP_REQ_HEADERS = {"host", "content-length", "connection", "accept-encoding"}
@@ -58,15 +61,38 @@ _SKIP_RESP_HEADERS = {
 # keeps ids, names and base64 image data out of the model's path.
 _CONTENT_KEYS = ("text", "content", "thinking", "input")
 
-app = FastAPI()
+
+async def _load_model() -> None:
+    """Background model load; the server answers /health meanwhile."""
+    print(f"Loading {redactor.model_id} ...", flush=True)
+    try:
+        await asyncio.to_thread(redactor.load)
+        print("model ready", flush=True)
+    except Exception as exc:  # noqa: BLE001 - reported via /health
+        redactor.load_error = f"{type(exc).__name__}: {exc}"
+        print(f"  ! model load FAILED: {redactor.load_error}", flush=True)
+    finally:
+        redactor.loading = False
+
+
+@asynccontextmanager
+async def _lifespan(_: FastAPI):
+    # `serve()` sets redactor.loading before uvicorn starts; tests drive the
+    # app without a lifespan, so a plain Redactor() is never "loading".
+    if redactor.loading:
+        asyncio.create_task(_load_model())
+    yield
+
+
+app = FastAPI(lifespan=_lifespan)
 client = httpx.AsyncClient(timeout=600)
-redactor = (
-    Redactor(
-        categories=frozenset(c.strip() for c in _CATEGORIES_ENV.split(",") if c.strip())
-    )
-    if _CATEGORIES_ENV
-    else Redactor()
-)
+redactor = Redactor(categories=CONFIG.categories, model_id=CONFIG.model)
+
+
+def _model_state() -> str:
+    if redactor.load_error:
+        return "error"
+    return "loading" if redactor.loading else "ready"
 
 
 def _redact_strings(node: Any) -> Any:
@@ -205,10 +231,15 @@ def _restore_body(body: bytes) -> bytes:
 # Registered before the catch-all so it never proxies upstream.
 @app.get("/health")
 async def health() -> dict:
+    state = _model_state()
     return {
-        "status": "ok",
+        "status": "ok" if state == "ready" else state,
+        "state": state,
+        "pid": os.getpid(),
+        "port": PORT,
         "model": redactor.model_id,
         "model_loaded": redactor._pipe is not None,
+        "load_error": redactor.load_error,
         "categories": sorted(redactor.categories),
         "unredact": UNREDACT,
         "upstream": UPSTREAM,
@@ -217,6 +248,14 @@ async def health() -> dict:
 
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
 async def proxy(request: Request, path: str) -> Response:
+    # Fail closed while the model isn't available: forwarding with only the
+    # regex floor would silently weaken the protection the user configured.
+    state = _model_state()
+    if state != "ready":
+        detail = f" ({redactor.load_error})" if state == "error" else ""
+        return _error_response(
+            503, f"redact-proxy: model {state}{detail} — retry in a moment"
+        )
     body = await request.body()
     stats_before = dict(redactor.stats)
     t0 = time.perf_counter()
@@ -304,16 +343,29 @@ async def proxy(request: Request, path: str) -> Response:
     )
 
 
-def main() -> None:
-    print(f"Loading {redactor.model_id} ...", flush=True)
-    redactor.load()
+def serve(cfg: Config) -> None:
+    """Bind the module globals to `cfg` and run until interrupted.
+
+    The model loads in the background after the socket is up, so `/health`
+    answers `loading` immediately instead of the port looking dead for a
+    minute; requests get a 503 until it is ready.
+    """
+    global CONFIG, UPSTREAM, PORT, UNREDACT, redactor
+    CONFIG, UPSTREAM, PORT, UNREDACT = cfg, cfg.upstream, cfg.port, cfg.unredact
+    redactor = Redactor(categories=cfg.categories, model_id=cfg.model)
+    redactor.loading = True
     print(
-        f"redact-proxy on http://127.0.0.1:{PORT} -> {UPSTREAM}\n"
-        f"  categories: {', '.join(sorted(redactor.categories))}\n"
-        f"  use: ANTHROPIC_BASE_URL=http://127.0.0.1:{PORT} claude",
+        f"redact-proxy on {cfg.base_url} -> {cfg.upstream}\n"
+        f"  categories: {', '.join(sorted(cfg.categories))}\n"
+        f"  unredact: {'on' if cfg.unredact else 'off (awareness mode)'}\n"
+        f"  use: ANTHROPIC_BASE_URL={cfg.base_url} claude",
         flush=True,
     )
-    uvicorn.run(app, host="127.0.0.1", port=PORT, log_level="warning")
+    uvicorn.run(app, host="127.0.0.1", port=cfg.port, log_level="warning")
+
+
+def main() -> None:
+    serve(config.load())
 
 
 if __name__ == "__main__":
