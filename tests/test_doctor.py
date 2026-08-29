@@ -34,6 +34,7 @@ def probes(tmp_path: Path, **over):
         "which": lambda cmd: "/usr/local/bin/claude",
         "shell_base_url": lambda: None,
         "plugin_installed": lambda: False,
+        "upstream_tls": lambda cfg: (True, "reachable"),
     }
     base.update(over)
     return doctor.Probes(**base)
@@ -192,3 +193,22 @@ def test_stream_mode_with_plugin_warns(tmp_path: Path) -> None:
 
 def test_no_hook_check_without_mode_signal(tmp_path: Path) -> None:
     assert hook_check(doctor.run_checks(CFG, probes(tmp_path, routed=True))) is None
+
+
+def test_upstream_tls_failure_hints_ca_bundle(tmp_path: Path) -> None:
+    pr = probes(
+        tmp_path,
+        routed=True,
+        upstream_tls=lambda cfg: (False, "TLS verification failed: self signed"),
+    )
+    [c] = [c for c in doctor.run_checks(CFG, pr) if c.name == "upstream tls"]
+    assert c.ok is False and "ca_bundle" in c.hint
+
+
+def test_upstream_tls_ok(tmp_path: Path) -> None:
+    [c] = [
+        c
+        for c in doctor.run_checks(CFG, probes(tmp_path, routed=True))
+        if c.name == "upstream tls"
+    ]
+    assert c.ok is True

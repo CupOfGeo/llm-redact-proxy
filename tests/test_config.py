@@ -92,3 +92,15 @@ def test_config_path_resolution(monkeypatch, tmp_path: Path) -> None:
     assert cfgmod.config_path() == tmp_path / "llm-redact-proxy" / "config.toml"
     monkeypatch.setenv("OPF_PROXY_CONFIG", str(tmp_path / "explicit.toml"))
     assert cfgmod.config_path() == tmp_path / "explicit.toml"
+
+
+def test_verify_tls_and_ca_bundle(tmp_path: Path) -> None:
+    assert cfgmod.load(path=tmp_path / "x", env={}).verify_tls is True
+    cfg = cfgmod.load(path=tmp_path / "x", env={"OPF_PROXY_VERIFY_TLS": "0"})
+    assert cfg.verify_tls is False
+    pem = tmp_path / "ca.pem"
+    pem.write_text("-----BEGIN CERTIFICATE-----\nx\n-----END CERTIFICATE-----\n")
+    cfg = cfgmod.load(path=tmp_path / "x", env={"OPF_PROXY_CA_BUNDLE": str(pem)})
+    assert cfg.ca_bundle == str(pem)
+    with pytest.raises(ValueError):  # non-existent bundle rejected
+        cfgmod.load(path=tmp_path / "x", env={"OPF_PROXY_CA_BUNDLE": "/no/such.pem"})

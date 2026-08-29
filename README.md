@@ -197,6 +197,22 @@ alarm that tells you if any of it ever fails. Local transcripts
 (`~/.claude/projects/**.jsonl`) retain raw tool output, so your disk holds
 the secrets it always held: full-disk encryption is assumed.
 
+### Corporate TLS inspection (Netskope, Zscaler, …)
+
+If your company runs a TLS-inspecting proxy, it re-signs `api.anthropic.com`
+with a corporate root CA. The proxy verifies the upstream against your
+**OS trust store** by default (via `truststore`), which already holds that
+corporate root — so it usually just works where a certifi-only client would
+fail with an SSL error. If it still fails, point at the CA explicitly:
+
+```bash
+redact-proxy config set ca_bundle /path/to/corp-root-ca.pem
+brew services restart llm-redact-proxy
+redact-proxy doctor        # the "upstream tls" check confirms the handshake
+```
+
+Last resort (not recommended): `redact-proxy config set verify_tls false`.
+
 ## Limits (honest ones)
 
 - This is a *mitigation*, not a guarantee: OPF's `secret` recall is not

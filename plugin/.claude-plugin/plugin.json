@@ -1,6 +1,6 @@
 {
   "name": "redact-proxy",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Guarded rehydration for llm-redact-proxy: restores redacted secrets only at tool execution, under an exfiltration policy",
   "author": { "name": "CupOfGeo" },
   "homepage": "https://github.com/CupOfGeo/llm-redact-proxy"

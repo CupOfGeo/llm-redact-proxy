@@ -92,6 +92,34 @@ async def _lifespan(_: FastAPI):
 
 
 app = FastAPI(lifespan=_lifespan)
+
+
+def build_client(cfg: Config) -> httpx.AsyncClient:
+    """httpx client whose upstream TLS trust matches the environment.
+
+    Default: verify against the OS trust store via `truststore`, so a
+    corporate MITM root (Netskope/Zscaler) that IT installed system-wide is
+    trusted without extra config — httpx's own default (certifi) would
+    reject the re-signed cert. `ca_bundle` pins an explicit PEM;
+    `verify_tls=False` turns verification off (last resort, logged loudly).
+    """
+    if not cfg.verify_tls:
+        logger.warning("tls_verification_disabled")
+        return httpx.AsyncClient(timeout=600, verify=False)
+    if cfg.ca_bundle:
+        return httpx.AsyncClient(timeout=600, verify=cfg.ca_bundle)
+    try:
+        import ssl
+
+        import truststore
+
+        ctx = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        return httpx.AsyncClient(timeout=600, verify=ctx)
+    except Exception as exc:  # noqa: BLE001 - fall back to certifi
+        logger.warning("truststore_unavailable", error=str(exc))
+        return httpx.AsyncClient(timeout=600)
+
+
 client = httpx.AsyncClient(timeout=600)
 redactor = Redactor(categories=CONFIG.categories, model_id=CONFIG.model)
 
@@ -288,6 +316,8 @@ async def health() -> dict:
         "categories": sorted(redactor.categories),
         "unredact": UNREDACT,
         "restore_endpoint": True,
+        "verify_tls": CONFIG.verify_tls,
+        "ca_bundle": CONFIG.ca_bundle or None,
         "upstream": UPSTREAM,
     }
 
@@ -417,8 +447,9 @@ def serve(cfg: Config) -> None:
     answers `loading` immediately instead of the port looking dead for a
     minute; requests get a 503 until it is ready.
     """
-    global CONFIG, UPSTREAM, PORT, UNREDACT, redactor
+    global CONFIG, UPSTREAM, PORT, UNREDACT, redactor, client
     CONFIG, UPSTREAM, PORT, UNREDACT = cfg, cfg.upstream, cfg.port, cfg.unredact
+    client = build_client(cfg)
     if not sys.stdout.isatty():
         if reconfigure := getattr(sys.stdout, "reconfigure", None):
             reconfigure(line_buffering=True)  # timely rows under launchd

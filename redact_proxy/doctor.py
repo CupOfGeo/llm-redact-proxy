@@ -58,6 +58,39 @@ def port_open(port: int) -> bool:
         return s.connect_ex(("127.0.0.1", port)) == 0
 
 
+def upstream_tls(cfg) -> tuple[bool, str]:
+    """(ok, detail): can we TLS-handshake with the upstream? Recognizes the
+    corporate-MITM cert failure (Netskope/Zscaler) and hints at the fix."""
+    import ssl
+    import urllib.error
+    import urllib.request
+
+    context = None
+    if not cfg.verify_tls:
+        context = ssl._create_unverified_context()
+    elif cfg.ca_bundle:
+        context = ssl.create_default_context(cafile=cfg.ca_bundle)
+    else:
+        try:
+            import truststore
+
+            context = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        except Exception:  # noqa: BLE001
+            context = None  # urllib default (certifi-less system store on mac)
+    try:
+        urllib.request.urlopen(cfg.upstream, timeout=8, context=context)
+        return True, f"{cfg.upstream} reachable"
+    except urllib.error.HTTPError:
+        return True, f"{cfg.upstream} reachable (TLS ok)"  # 4xx = handshake fine
+    except ssl.SSLError as exc:
+        return (
+            False,
+            f"TLS verification failed: {exc.reason if hasattr(exc, 'reason') else exc}",
+        )
+    except Exception as exc:  # noqa: BLE001
+        return False, f"{type(exc).__name__}: {exc}"
+
+
 def plugin_installed() -> bool:
     """Is the redact-proxy Claude Code plugin installed for this user?"""
     manifest = Path.home() / ".claude" / "plugins" / "installed_plugins.json"
@@ -96,6 +129,7 @@ class Probes:
     shell_base_url: Callable[[], str | None] = lambda: os.environ.get(
         "ANTHROPIC_BASE_URL"
     )
+    upstream_tls: Callable = upstream_tls
 
 
 def run_checks(cfg: Config, probes: Probes) -> list[Check]:
@@ -252,6 +286,21 @@ def run_checks(cfg: Config, probes: Probes) -> list[Check]:
                 "unredact=hook + plugin installed (guarded rehydration)",
             )
         )
+
+    tls_ok, tls_detail = probes.upstream_tls(cfg)
+    checks.append(
+        Check(
+            "upstream tls",
+            tls_ok,
+            tls_detail,
+            ""
+            if tls_ok
+            else "corporate TLS inspection? the OS trust store is used by "
+            "default; if it still fails, point at the corporate CA: "
+            "redact-proxy config set ca_bundle /path/to/corp-ca.pem "
+            "(then restart the service)",
+        )
+    )
 
     claude = probes.which("claude")
     checks.append(Check("claude cli", None, claude or "claude not on PATH"))

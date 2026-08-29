@@ -29,6 +29,8 @@ ENV_VARS = {
     "model": "OPF_PROXY_MODEL",
     "log_file": "OPF_PROXY_LOG_FILE",
     "log_level": "OPF_PROXY_LOG_LEVEL",
+    "ca_bundle": "OPF_PROXY_CA_BUNDLE",
+    "verify_tls": "OPF_PROXY_VERIFY_TLS",
     "restore_policy": "OPF_PROXY_RESTORE_POLICY",
     "restore_allow_hosts": "OPF_PROXY_RESTORE_ALLOW_HOSTS",
 }
@@ -55,6 +57,12 @@ class Config:
     # external host (possible exfiltration): ask (permission prompt) | deny.
     restore_policy: str = "ask"
     restore_allow_hosts: tuple[str, ...] = ()
+    # TLS to the upstream. Empty ca_bundle = verify against the OS trust
+    # store (picks up a corporate root like Netskope/Zscaler that IT
+    # installed system-wide). Set ca_bundle to a PEM to pin an explicit
+    # bundle. verify_tls=false disables verification (last resort).
+    ca_bundle: str = ""
+    verify_tls: bool = True
 
     @property
     def base_url(self) -> str:
@@ -78,6 +86,8 @@ class Config:
             f'log_level = "{self.log_level}"\n'
             f'restore_policy = "{self.restore_policy}"\n'
             f"restore_allow_hosts = [{hosts}]\n"
+            f'ca_bundle = "{self.ca_bundle}"\n'
+            f"verify_tls = {'true' if self.verify_tls else 'false'}\n"
         )
 
 
@@ -100,6 +110,10 @@ def _coerce(key: str, value: Any) -> Any:
         if isinstance(value, str):
             value = value.split(",")
         return frozenset(c.strip() for c in value if str(c).strip())
+    if key == "verify_tls":
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() not in {"0", "false", "no", "off", ""}
     if key == "unredact":
         if isinstance(value, bool):  # pre-0.4 TOML booleans
             return "stream" if value else "off"
@@ -121,6 +135,8 @@ def _validate(cfg: Config) -> Config:
         raise ValueError("categories must not be empty")
     if cfg.unredact not in ("stream", "hook", "off"):
         raise ValueError(f"unredact must be stream/hook/off: {cfg.unredact!r}")
+    if cfg.ca_bundle and not Path(cfg.ca_bundle).expanduser().is_file():
+        raise ValueError(f"ca_bundle is not a file: {cfg.ca_bundle}")
     if cfg.restore_policy not in ("ask", "deny"):
         raise ValueError(f"restore_policy must be ask/deny: {cfg.restore_policy!r}")
     if cfg.log_level not in ("debug", "info", "warning", "error"):
