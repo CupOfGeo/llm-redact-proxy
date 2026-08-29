@@ -231,3 +231,13 @@ Last resort (not recommended): `redact-proxy config set verify_tls false`.
 ## Roadmap
 
 See [ROADMAP.md](ROADMAP.md) for planned features and the testing backlog.
+
+## License & attribution
+
+This project is licensed under the [MIT License](LICENSE).
+
+Layer 2 uses the [OpenMed/privacy-filter-mlx-8bit](https://huggingface.co/OpenMed/privacy-filter-mlx-8bit)
+model, licensed under Apache-2.0. The model is downloaded at runtime from
+Hugging Face — it is not redistributed with this package. The regex floor
+(layer 1) is curated from [gitleaks](https://github.com/gitleaks/gitleaks)'
+default ruleset (MIT).
