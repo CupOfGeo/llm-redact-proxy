@@ -33,6 +33,7 @@ def probes(tmp_path: Path, **over):
         "launchd_loaded": lambda label: False,
         "which": lambda cmd: "/usr/local/bin/claude",
         "shell_base_url": lambda: None,
+        "plugin_installed": lambda: False,
     }
     base.update(over)
     return doctor.Probes(**base)
@@ -147,3 +148,47 @@ def test_shell_env_is_informational(tmp_path: Path) -> None:
     )
     [c] = [c for c in checks if c.name == "shell env"]
     assert c.ok is None and "8787" in c.detail
+
+
+HOOK_HEALTH = READY | {"unredact": "hook"}
+STREAM_HEALTH = READY | {"unredact": "stream"}
+
+
+def hook_check(checks):
+    found = [c for c in checks if c.name == "hook mode"]
+    return found[0] if found else None
+
+
+def test_hook_mode_without_plugin_fails(tmp_path: Path) -> None:
+    c = hook_check(
+        doctor.run_checks(
+            CFG, probes(tmp_path, routed=True, health=lambda u: HOOK_HEALTH)
+        )
+    )
+    assert c is not None and c.ok is False and "/plugin install" in c.hint
+
+
+def test_hook_mode_with_plugin_ok(tmp_path: Path) -> None:
+    pr = probes(
+        tmp_path,
+        routed=True,
+        health=lambda u: HOOK_HEALTH,
+        plugin_installed=lambda: True,
+    )
+    c = hook_check(doctor.run_checks(CFG, pr))
+    assert c is not None and c.ok is True
+
+
+def test_stream_mode_with_plugin_warns(tmp_path: Path) -> None:
+    pr = probes(
+        tmp_path,
+        routed=True,
+        health=lambda u: STREAM_HEALTH,
+        plugin_installed=lambda: True,
+    )
+    c = hook_check(doctor.run_checks(CFG, pr))
+    assert c is not None and c.ok is None and "never engages" in c.detail
+
+
+def test_no_hook_check_without_mode_signal(tmp_path: Path) -> None:
+    assert hook_check(doctor.run_checks(CFG, probes(tmp_path, routed=True))) is None

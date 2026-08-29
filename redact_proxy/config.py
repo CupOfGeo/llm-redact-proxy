@@ -29,6 +29,8 @@ ENV_VARS = {
     "model": "OPF_PROXY_MODEL",
     "log_file": "OPF_PROXY_LOG_FILE",
     "log_level": "OPF_PROXY_LOG_LEVEL",
+    "restore_policy": "OPF_PROXY_RESTORE_POLICY",
+    "restore_allow_hosts": "OPF_PROXY_RESTORE_ALLOW_HOSTS",
 }
 
 
@@ -49,6 +51,10 @@ class Config:
     model: str = DEFAULT_MODEL
     log_file: str = DEFAULT_LOG_FILE
     log_level: str = "info"  # debug adds per-redaction and per-chunk events
+    # Hook mode: what to do when a tool input holds a placeholder AND an
+    # external host (possible exfiltration): ask (permission prompt) | deny.
+    restore_policy: str = "ask"
+    restore_allow_hosts: tuple[str, ...] = ()
 
     @property
     def base_url(self) -> str:
@@ -61,6 +67,7 @@ class Config:
     def to_toml(self) -> str:
         """Flat TOML. Hand-rolled: stdlib parses TOML but doesn't write it."""
         cats = ", ".join(f'"{c}"' for c in sorted(self.categories))
+        hosts = ", ".join(f'"{h}"' for h in self.restore_allow_hosts)
         return (
             f"port = {self.port}\n"
             f'upstream = "{self.upstream}"\n'
@@ -69,6 +76,8 @@ class Config:
             f'model = "{self.model}"\n'
             f'log_file = "{self.log_file}"\n'
             f'log_level = "{self.log_level}"\n'
+            f'restore_policy = "{self.restore_policy}"\n'
+            f"restore_allow_hosts = [{hosts}]\n"
         )
 
 
@@ -79,6 +88,14 @@ def _coerce(key: str, value: Any) -> Any:
     """Normalize a raw TOML/env/CLI value into the field's type."""
     if key == "port":
         return int(value)
+    if key == "restore_allow_hosts":
+        if isinstance(value, str):
+            value = value.split(",")
+        return tuple(
+            sorted(
+                {str(h).strip().lower().lstrip(".") for h in value if str(h).strip()}
+            )
+        )
     if key == "categories":
         if isinstance(value, str):
             value = value.split(",")
@@ -104,6 +121,8 @@ def _validate(cfg: Config) -> Config:
         raise ValueError("categories must not be empty")
     if cfg.unredact not in ("stream", "hook", "off"):
         raise ValueError(f"unredact must be stream/hook/off: {cfg.unredact!r}")
+    if cfg.restore_policy not in ("ask", "deny"):
+        raise ValueError(f"restore_policy must be ask/deny: {cfg.restore_policy!r}")
     if cfg.log_level not in ("debug", "info", "warning", "error"):
         raise ValueError(
             f"log_level must be debug/info/warning/error: {cfg.log_level!r}"

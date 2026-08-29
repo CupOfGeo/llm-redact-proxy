@@ -302,7 +302,11 @@ def setup(no_download: bool, no_route: bool, force: bool) -> None:
     click.echo(
         "\nnext:\n"
         "  brew services start llm-redact-proxy    # or: redact-proxy run\n"
-        "  redact-proxy doctor"
+        "  redact-proxy doctor\n"
+        "optional guarded rehydration (see README threat model):\n"
+        "  /plugin marketplace add CupOfGeo/llm-redact-proxy   # inside Claude Code\n"
+        "  /plugin install redact-proxy@cupofgeo\n"
+        "  redact-proxy config set unredact hook"
     )
 
 
@@ -370,6 +374,29 @@ def hook_snippet() -> None:
         "session; routing itself is fail-closed.",
         err=True,
     )
+
+
+@cli.group()
+def hook() -> None:
+    """Claude Code hook entry points (used by the redact-proxy plugin)."""
+
+
+def _run_hook(event: str) -> None:
+    from redact_proxy import hook as hookmod
+
+    sys.exit(hookmod.main([event]))
+
+
+@hook.command("pre-tool-use")
+def hook_pre_tool_use() -> None:
+    """Restore placeholders in tool input via /restore, under exfil policy."""
+    _run_hook("pre-tool-use")
+
+
+@hook.command("session-start")
+def hook_session_start() -> None:
+    """Warn (advisory) when the proxy is not ready at session start."""
+    _run_hook("session-start")
 
 
 def main() -> None:

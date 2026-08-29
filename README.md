@@ -158,6 +158,40 @@ placeholders pass through unrestored until the secret transits outbound
 again. Placeholders the client truncates or re-wraps hash differently and
 are not restored.
 
+### Hook mode: guarded rehydration (the plugin)
+
+`unredact = "hook"` closes most of the oracle: responses pass through with
+placeholders intact, and restoration happens only at tool execution, via a
+Claude Code PreToolUse hook that rewrites the tool input (`updatedInput`).
+Before restoring, the hook checks the same input for external hosts; if a
+redacted secret and an outside destination appear together, restoration is
+withheld and you get a permission prompt naming the host (`restore_policy
+= "ask"`, or `"deny"` to block outright; trusted hosts go in
+`restore_allow_hosts`). Real values then exist only inside the executing
+tool call — never in streamed text or the transcript's assistant turns.
+
+```text
+# inside Claude Code
+/plugin marketplace add CupOfGeo/llm-redact-proxy
+/plugin install redact-proxy@cupofgeo
+# then
+redact-proxy config set unredact hook && brew services restart llm-redact-proxy
+redact-proxy doctor       # checks mode + plugin agree
+```
+
+### Defense in depth (what this tool does not do)
+
+The proxy guards the *network path to the model provider*, and hook mode
+guards *restoration into tool calls*. An agent with shell access can still
+exfiltrate a secret it never read (`curl -d @~/.aws/credentials …`) — no
+redactor can see that. Pair this tool with: credentials kept out of
+plaintext files (Keychain, `op run`, short-lived tokens), permission deny
+rules on secret paths, prompts on network commands, and a
+[canary token](https://canarytokens.org) planted where agents read — the
+alarm that tells you if any of it ever fails. Local transcripts
+(`~/.claude/projects/**.jsonl`) retain raw tool output, so your disk holds
+the secrets it always held: full-disk encryption is assumed.
+
 ## Limits (honest ones)
 
 - This is a *mitigation*, not a guarantee: OPF's `secret` recall is not

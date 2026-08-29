@@ -2,6 +2,17 @@
 
 Feature ideas and testing backlog. Rough priority order within each section.
 
+## Next (0.5.0 candidates)
+
+- Flip the default to `unredact = "hook"` once the plugin has mileage.
+- `route --deep`: launchctl setenv + zshenv export, covering SDK tools
+  beyond Claude Code (claude-mem's observer was caught bypassing 2026-08-29).
+- `doctor` egress check: lsof for processes talking to LLM API hosts that
+  aren't the proxy.
+- Pi-hole recipe: sinkhole LLM API domains network-wide; the proxy resolves
+  via DoH and becomes the only path out (fail-closed for bypassers).
+- `OPF_PROXY_DEBUG_DUMP` body dumps; log rotation via newsyslog.
+
 ## Features
 
 ### 1. ~~Un-redaction round-trip ("hash and unhash")~~ — shipped

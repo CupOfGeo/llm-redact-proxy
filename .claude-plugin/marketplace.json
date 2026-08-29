@@ -1,0 +1,11 @@
+{
+  "name": "cupofgeo",
+  "owner": { "name": "CupOfGeo" },
+  "plugins": [
+    {
+      "name": "redact-proxy",
+      "source": "./plugin",
+      "description": "Guarded rehydration for llm-redact-proxy (hook mode)"
+    }
+  ]
+}

@@ -58,6 +58,15 @@ def port_open(port: int) -> bool:
         return s.connect_ex(("127.0.0.1", port)) == 0
 
 
+def plugin_installed() -> bool:
+    """Is the redact-proxy Claude Code plugin installed for this user?"""
+    manifest = Path.home() / ".claude" / "plugins" / "installed_plugins.json"
+    try:
+        return "redact-proxy" in manifest.read_text()
+    except OSError:
+        return False
+
+
 def launchd_loaded(label: str) -> bool:
     try:
         return (
@@ -83,6 +92,7 @@ class Probes:
     settings_path: Callable[[], Path] = routing.settings_path
     launchd_loaded: Callable[[str], bool] = launchd_loaded
     which: Callable[[str], str | None] = shutil.which
+    plugin_installed: Callable[[], bool] = plugin_installed
     shell_base_url: Callable[[], str | None] = lambda: os.environ.get(
         "ANTHROPIC_BASE_URL"
     )
@@ -207,6 +217,39 @@ def run_checks(cfg: Config, probes: Probes) -> list[Check]:
                 "launchd",
                 None,
                 "no login service installed (foreground `redact-proxy run` only)",
+            )
+        )
+
+    mode = (health or {}).get("unredact")
+    plugin = probes.plugin_installed()
+    if mode == "hook" and not plugin:
+        checks.append(
+            Check(
+                "hook mode",
+                False,
+                "unredact=hook but the redact-proxy plugin is not installed — "
+                "placeholders will NEVER be restored",
+                "in Claude Code: /plugin marketplace add CupOfGeo/llm-redact-proxy, "
+                "then /plugin install redact-proxy@cupofgeo "
+                "(or: redact-proxy config set unredact stream)",
+            )
+        )
+    elif mode == "stream" and plugin:
+        checks.append(
+            Check(
+                "hook mode",
+                None,
+                "plugin installed but unredact=stream: responses are restored "
+                "before the hook runs, so the exfil gate never engages",
+                "redact-proxy config set unredact hook && brew services restart llm-redact-proxy",
+            )
+        )
+    elif mode == "hook":
+        checks.append(
+            Check(
+                "hook mode",
+                True,
+                "unredact=hook + plugin installed (guarded rehydration)",
             )
         )
 
