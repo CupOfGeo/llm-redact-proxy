@@ -31,6 +31,11 @@ _CONFIG_OPTS = [
         "--categories", help="Comma-separated OPF categories (e.g. secret,person)."
     ),
     click.option(
+        "--log-level",
+        type=click.Choice(["debug", "info", "warning", "error"]),
+        help="debug adds per-redaction and per-chunk OPF events.",
+    ),
+    click.option(
         "--unredact/--no-unredact",
         default=None,
         help="Restore real values in responses (default on; off = awareness mode).",

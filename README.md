@@ -91,6 +91,21 @@ log_file = "~/Library/Logs/redact-proxy.log"
 `OPF_PROXY_UNREDACT`, `OPF_PROXY_MODEL`, `OPF_PROXY_LOG_FILE` override the
 file; `run` flags override both. Restart the service after changes.
 
+### Logs
+
+The service writes one JSON row per event, so the log is jq-able:
+
+```bash
+redact-proxy logs -f | jq -r 'select(.event=="request") | "\(.status) \(.bytes)b \(.redactions) redacted \(.redact_ms)ms"'
+redact-proxy logs | jq 'select(.event=="upstream_error")'
+```
+
+`log_level = "debug"` adds per-redaction rows (`layer`, `category`,
+`length` — never the value) and per-scan OPF timing (`chunks`,
+`slowest_ms`). Foreground `redact-proxy run` in a terminal pretty-prints
+instead of JSON. The log grows unbounded; point macOS `newsyslog` at it if
+that bothers you.
+
 ## Design notes
 
 - **Deterministic placeholders** (`⟨REDACTED:secret:a1b2c3⟩`, hash-keyed):

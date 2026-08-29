@@ -28,7 +28,7 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from redact_proxy import config
+from redact_proxy import config, log
 from redact_proxy.config import Config
 from redact_proxy.redactor import Redactor
 from redact_proxy.unredact import SSERestorer
@@ -44,6 +44,8 @@ PORT = CONFIG.port
 # prompt-injected model can echo a placeholder into a locally executed
 # tool call and get the real secret restored — see README "Threat model".
 UNREDACT = CONFIG.unredact
+
+logger = log.get("server")
 
 # Hop-by-hop / recalculated headers that must not be forwarded verbatim.
 _SKIP_REQ_HEADERS = {"host", "content-length", "connection", "accept-encoding"}
@@ -64,13 +66,14 @@ _CONTENT_KEYS = ("text", "content", "thinking", "input")
 
 async def _load_model() -> None:
     """Background model load; the server answers /health meanwhile."""
-    print(f"Loading {redactor.model_id} ...", flush=True)
+    logger.info("model_loading", model=redactor.model_id)
+    t0 = time.perf_counter()
     try:
         await asyncio.to_thread(redactor.load)
-        print("model ready", flush=True)
+        logger.info("model_ready", seconds=round(time.perf_counter() - t0, 1))
     except Exception as exc:  # noqa: BLE001 - reported via /health
         redactor.load_error = f"{type(exc).__name__}: {exc}"
-        print(f"  ! model load FAILED: {redactor.load_error}", flush=True)
+        logger.error("model_load_failed", error=redactor.load_error)
     finally:
         redactor.loading = False
 
@@ -179,7 +182,7 @@ def _redact_body(body: bytes) -> bytes:
         # Compact separators: match SDK wire format so size/flag stay honest.
         text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     except Exception as exc:  # noqa: BLE001 - regex floor already applied
-        print(f"  ! OPF pass skipped: {exc}", file=sys.stderr, flush=True)
+        logger.warning("opf_pass_skipped", error=str(exc))
     if before is not None:
         after = _shape(payload)
         if after != before:
@@ -262,7 +265,13 @@ async def proxy(request: Request, path: str) -> Response:
     try:
         scrubbed = _redact_body(body) if body else body
     except RedactionShapeError as exc:
-        print(f"{request.method} /{path} {len(body)}b | REFUSED: {exc}", flush=True)
+        logger.error(
+            "request_refused",
+            method=request.method,
+            path=path,
+            bytes=len(body),
+            reason=str(exc),
+        )
         return _error_response(500, f"redact-proxy refused to forward: {exc}")
     redact_ms = (time.perf_counter() - t0) * 1000
     cached = redactor.stats["cached"] - stats_before["cached"]
@@ -270,7 +279,6 @@ async def proxy(request: Request, path: str) -> Response:
     # Counts NEW redactions only — placeholders already inside cached blocks
     # were counted when first scanned.
     redactions = redactor.stats["redactions"] - stats_before["redactions"]
-    redacted_flag = f" [{redactions} REDACTED]" if redactions else ""
 
     headers = {
         k: v for k, v in request.headers.items() if k.lower() not in _SKIP_REQ_HEADERS
@@ -288,20 +296,27 @@ async def proxy(request: Request, path: str) -> Response:
             stream=True,
         )
     except httpx.HTTPError as exc:
-        print(
-            f"{request.method} /{path} {len(body)}b{redacted_flag} | "
-            f"upstream unreachable: {type(exc).__name__}: {exc}",
-            flush=True,
+        logger.error(
+            "upstream_unreachable",
+            method=request.method,
+            path=path,
+            error=f"{type(exc).__name__}: {exc}",
         )
         return _error_response(
             502, f"redact-proxy: upstream {UPSTREAM} unreachable ({exc})"
         )
     ttfb_ms = (time.perf_counter() - t1) * 1000
-    print(
-        f"{request.method} /{path} {len(body)}b{redacted_flag} | "
-        f"redact {redact_ms:.1f}ms ({scanned} scanned, {cached} cached) | "
-        f"upstream ttfb {ttfb_ms:.0f}ms -> {upstream.status_code}",
-        flush=True,
+    logger.info(
+        "request",
+        method=request.method,
+        path=path,
+        bytes=len(body),
+        redactions=redactions,
+        scanned=scanned,
+        cached=cached,
+        redact_ms=round(redact_ms, 1),
+        ttfb_ms=round(ttfb_ms),
+        status=upstream.status_code,
     )
     resp_headers = {
         k: v for k, v in upstream.headers.items() if k.lower() not in _SKIP_RESP_HEADERS
@@ -322,9 +337,10 @@ async def proxy(request: Request, path: str) -> Response:
                     yield tail
             finally:  # also runs on client disconnect — no leaked upstream
                 await upstream.aclose()
-                print(
-                    f"  stream /{path} done in {time.perf_counter() - t1:.1f}s",
-                    flush=True,
+                logger.info(
+                    "stream_done",
+                    path=path,
+                    seconds=round(time.perf_counter() - t1, 1),
                 )
 
         return StreamingResponse(
@@ -336,6 +352,14 @@ async def proxy(request: Request, path: str) -> Response:
 
     content = await upstream.aread()
     await upstream.aclose()
+    if upstream.status_code >= 400:
+        # The upstream's own words — the most useful line in an incident.
+        # Capped; error bodies are the API's text, not conversation content.
+        logger.warning(
+            "upstream_error",
+            status=upstream.status_code,
+            body=content[:300].decode("utf-8", "replace"),
+        )
     if UNREDACT:
         content = _restore_body(content)
     return Response(
@@ -352,14 +376,22 @@ def serve(cfg: Config) -> None:
     """
     global CONFIG, UPSTREAM, PORT, UNREDACT, redactor
     CONFIG, UPSTREAM, PORT, UNREDACT = cfg, cfg.upstream, cfg.port, cfg.unredact
+    if not sys.stdout.isatty():
+        if reconfigure := getattr(sys.stdout, "reconfigure", None):
+            reconfigure(line_buffering=True)  # timely rows under launchd
+        # Keep hf_hub's tqdm bars out of the JSON log (read at download time).
+        os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+    log.configure(cfg.log_level)
     redactor = Redactor(categories=cfg.categories, model_id=cfg.model)
     redactor.loading = True
-    print(
-        f"redact-proxy on {cfg.base_url} -> {cfg.upstream}\n"
-        f"  categories: {', '.join(sorted(cfg.categories))}\n"
-        f"  unredact: {'on' if cfg.unredact else 'off (awareness mode)'}\n"
-        f"  use: ANTHROPIC_BASE_URL={cfg.base_url} claude",
-        flush=True,
+    logger.info(
+        "proxy_started",
+        url=cfg.base_url,
+        upstream=cfg.upstream,
+        categories=sorted(cfg.categories),
+        unredact=cfg.unredact,
+        log_level=cfg.log_level,
+        hint=f"ANTHROPIC_BASE_URL={cfg.base_url} claude",
     )
     uvicorn.run(app, host="127.0.0.1", port=cfg.port, log_level="warning")
 

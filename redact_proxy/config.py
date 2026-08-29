@@ -28,6 +28,7 @@ ENV_VARS = {
     "unredact": "OPF_PROXY_UNREDACT",
     "model": "OPF_PROXY_MODEL",
     "log_file": "OPF_PROXY_LOG_FILE",
+    "log_level": "OPF_PROXY_LOG_LEVEL",
 }
 
 
@@ -47,6 +48,7 @@ class Config:
     unredact: bool = True
     model: str = DEFAULT_MODEL
     log_file: str = DEFAULT_LOG_FILE
+    log_level: str = "info"  # debug adds per-redaction and per-chunk events
 
     @property
     def base_url(self) -> str:
@@ -66,6 +68,7 @@ class Config:
             f"unredact = {'true' if self.unredact else 'false'}\n"
             f'model = "{self.model}"\n'
             f'log_file = "{self.log_file}"\n'
+            f'log_level = "{self.log_level}"\n'
         )
 
 
@@ -94,6 +97,10 @@ def _validate(cfg: Config) -> Config:
         raise ValueError(f"upstream must be an http(s) URL: {cfg.upstream!r}")
     if not cfg.categories:
         raise ValueError("categories must not be empty")
+    if cfg.log_level not in ("debug", "info", "warning", "error"):
+        raise ValueError(
+            f"log_level must be debug/info/warning/error: {cfg.log_level!r}"
+        )
     return cfg
 
 

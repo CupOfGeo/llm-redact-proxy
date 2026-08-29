@@ -17,7 +17,12 @@ from __future__ import annotations
 
 import hashlib
 import re
+import time
 from typing import Any
+
+from redact_proxy import log
+
+logger = log.get("redactor")
 
 DEFAULT_MODEL = "OpenMed/privacy-filter-mlx-8bit"
 
@@ -191,9 +196,12 @@ class Redactor:
         model_path = snapshot_download(self.model_id)
         self._pipe = create_mlx_pipeline(model_path)
 
-    def _record(self, category: str, value: str) -> str:
+    def _record(self, category: str, value: str, layer: str) -> str:
         """Placeholder for `value`, remembering the reverse mapping."""
         placeholder = _placeholder(category, value)
+        # Length + category only — never the value. An outsized match is the
+        # red flag that would have exposed the 2026-08 PEM-regex incident.
+        logger.debug("redaction", layer=layer, category=category, length=len(value))
         self.reverse[placeholder] = value
         self.stats["redactions"] += 1
         return placeholder
@@ -212,7 +220,7 @@ class Redactor:
         """Layer 1 only. Safe to run on raw request bytes."""
 
         def replace(m: re.Match) -> str:
-            return self._record("secret", m.group())
+            return self._record("secret", m.group(), "regex")
 
         for pattern in TOKEN_PATTERNS:
             text = pattern.sub(replace, text)
@@ -221,8 +229,11 @@ class Redactor:
     def _opf_spans(self, text: str) -> list[dict]:
         spans: list[dict] = []
         offset = 0
+        chunk_ms: list[float] = []
         for chunk in _chunks(text):
+            t0 = time.perf_counter()
             raw = self._pipe(chunk)
+            chunk_ms.append((time.perf_counter() - t0) * 1000)
             items = raw if isinstance(raw, list) else []
             for s in items:
                 if not isinstance(s, dict):
@@ -239,6 +250,13 @@ class Redactor:
                     }
                 )
             offset += len(chunk)
+        logger.debug(
+            "opf_scan",
+            chars=len(text),
+            chunks=len(chunk_ms),
+            total_ms=round(sum(chunk_ms), 1),
+            slowest_ms=round(max(chunk_ms), 1) if chunk_ms else 0,
+        )
         return spans
 
     def redact(self, text: str) -> str:
@@ -274,7 +292,7 @@ class Redactor:
                     continue
                 out = (
                     out[: s["start"]]
-                    + self._record(s["category"], value)
+                    + self._record(s["category"], value, "opf")
                     + out[s["end"] :]
                 )
                 prev_start = s["start"]

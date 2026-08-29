@@ -47,7 +47,11 @@ Not needed yet, but the repo name leaves room:
 - Rename env vars from `OPF_PROXY_*` to something provider-neutral when
   this lands (keep old names as aliases).
 
-### 4. Debug logging
+### 4. ~~Debug logging~~ — shipped (structlog JSON rows; see README "Logs")
+Still open from the original list: `OPF_PROXY_DEBUG_DUMP` body dumps
+(redacted request + response to a dir; explicit footgun) and log rotation
+(delegated to `newsyslog` for now). Original notes:
+
 The launchd log (`~/Library/Logs/redact-proxy.log`) is one line per request:
 size, count, timings, status. The Aug 2026 PEM-regex bug (a lazy match
 swallowing 20 `tool_use` blocks, API then rejected the orphaned
@@ -60,12 +64,6 @@ Log what would have caught it, without ever logging a value:
   difference — and make it a runtime invariant in `_redact_body`, not just
   a log line (redaction must never change body shape).
 - **Upstream error bodies** on 4xx/5xx (the API's own message, not ours).
-- **OPF throughput** (measured 2026-08-29, M-series, cold cache): ~0.7 s per
-  6 KB chunk ≈ 5 KB/s, so a 200 KB resumed conversation is ~40 s before
-  the first request leaves. The hard chunk cap removed the quadratic
-  cliff (32 KB in one call was 22 s); the baseline needs batching chunks
-  through one pipeline call and/or a disk-persistent scan cache
-  (hash → redacted text, no secrets) so restarts don't rescan history.
 - **Per-chunk OPF timing** — a 574 KB body took 22 s; need to see whether
   that's a few huge chunks or a cache-miss storm.
 - `OPF_PROXY_LOG_LEVEL` (info default / debug), JSONL records so they're
@@ -75,7 +73,18 @@ Log what would have caught it, without ever logging a value:
   Never the pre-redaction body. Off by default; README must say "this is
   your whole conversation history on disk".
 
-### 5. Smaller ideas
+### 5. OPF throughput
+(Measured 2026-08-29, M-series, cold cache): ~0.7 s per
+  6 KB chunk ≈ 5 KB/s, so a 200 KB resumed conversation is ~40 s before
+  the first request leaves. The hard chunk cap removed the quadratic
+  cliff (32 KB in one call was 22 s); the baseline needs batching chunks
+  through one pipeline call and/or a disk-persistent scan cache
+  (hash → redacted text, no secrets) so restarts don't rescan history.
+First data point from production: a cold-cache 1 MB request took 80 s
+(604 texts scanned). Levers: batch chunks through one pipeline call;
+disk-persistent scan cache (hash → redacted text, no secrets).
+
+### 6. Smaller ideas
 - `gitleaks` pre-commit hook in this repo (eat own dog food).
 - ~~Config file instead of env vars only~~ — shipped (`~/.config/llm-redact-proxy/config.toml`).
 - Optional response-side scanning (model echoing a secret it inferred).
