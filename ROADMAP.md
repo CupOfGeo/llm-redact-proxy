@@ -55,6 +55,12 @@ Log what would have caught it, without ever logging a value:
   difference — and make it a runtime invariant in `_redact_body`, not just
   a log line (redaction must never change body shape).
 - **Upstream error bodies** on 4xx/5xx (the API's own message, not ours).
+- **OPF throughput** (measured 2026-08-29, M-series, cold cache): ~0.7 s per
+  6 KB chunk ≈ 5 KB/s, so a 200 KB resumed conversation is ~40 s before
+  the first request leaves. The hard chunk cap removed the quadratic
+  cliff (32 KB in one call was 22 s); the baseline needs batching chunks
+  through one pipeline call and/or a disk-persistent scan cache
+  (hash → redacted text, no secrets) so restarts don't rescan history.
 - **Per-chunk OPF timing** — a 574 KB body took 22 s; need to see whether
   that's a few huge chunks or a cache-miss storm.
 - `OPF_PROXY_LOG_LEVEL` (info default / debug), JSONL records so they're

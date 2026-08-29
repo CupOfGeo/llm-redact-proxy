@@ -93,8 +93,10 @@ TOKEN_PATTERNS = [
     ),
 ]
 
-# Texts longer than this are split on line boundaries before OPF inference.
-CHUNK_CHARS = 4000
+# Hard cap on the text handed to one OPF inference call. Cost grows
+# superlinearly with length (measured on M-series: 16 KB ≈ 4.6 s, 32 KB ≈
+# 22 s in one call; 4–8 KB pieces are the most efficient per byte).
+CHUNK_CHARS = 6000
 
 _CACHE_MAX = 8192
 
@@ -113,8 +115,32 @@ def _normalize_label(label: str) -> str:
     return label.lower().removeprefix("private_")
 
 
+_WS = re.compile(r"\s")
+
+
+def _hard_split(piece: str) -> list[str]:
+    """Cut a piece longer than CHUNK_CHARS, after the last whitespace in the
+    back half of each window when there is one (never mid-token if
+    avoidable), else at the cap. A freeform secret straddling a cut can be
+    missed by OPF — accepted; the regex floor saw the whole text already."""
+    out: list[str] = []
+    while len(piece) > CHUNK_CHARS:
+        cut = CHUNK_CHARS
+        for m in _WS.finditer(piece, CHUNK_CHARS // 2, CHUNK_CHARS):
+            cut = m.end()
+        out.append(piece[:cut])
+        piece = piece[cut:]
+    out.append(piece)
+    return out
+
+
 def _chunks(text: str) -> list[str]:
-    """Split on line boundaries into pieces of roughly CHUNK_CHARS."""
+    """Pieces of at most CHUNK_CHARS, packed on line boundaries.
+
+    Whole lines are packed while they fit; any piece still over the cap
+    (a single enormous line: minified JSON, base64, a tool result with no
+    newlines) is hard-split so no inference call ever exceeds it.
+    """
     if len(text) <= CHUNK_CHARS:
         return [text]
     pieces: list[str] = []
@@ -128,7 +154,7 @@ def _chunks(text: str) -> list[str]:
         size += len(line)
     if buf:
         pieces.append("".join(buf))
-    return pieces
+    return [part for piece in pieces for part in _hard_split(piece)]
 
 
 class Redactor:

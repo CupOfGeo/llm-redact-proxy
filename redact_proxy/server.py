@@ -24,7 +24,7 @@ from typing import Any
 import httpx
 import uvicorn
 from fastapi import FastAPI, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from redact_proxy.redactor import Redactor
 from redact_proxy.unredact import SSERestorer
@@ -51,8 +51,11 @@ _SKIP_RESP_HEADERS = {
     "connection",
 }
 
-# Content keys that carry user/tool text worth scanning. "input" covers
-# tool_use blocks (model-authored commands can echo secrets it was shown).
+# Content keys that carry user/tool text worth scanning. Under "input"
+# (tool_use blocks) every string is scanned — the keys are tool-defined
+# ("command", "content", ...) and model-authored commands can echo secrets
+# the model was shown. Elsewhere only these keys are followed, which also
+# keeps ids, names and base64 image data out of the model's path.
 _CONTENT_KEYS = ("text", "content", "thinking", "input")
 
 app = FastAPI()
@@ -66,6 +69,17 @@ redactor = (
 )
 
 
+def _redact_strings(node: Any) -> Any:
+    """Every string beneath `node` (values only; keys are structure)."""
+    if isinstance(node, str):
+        return redactor.redact(node)
+    if isinstance(node, list):
+        return [_redact_strings(item) for item in node]
+    if isinstance(node, dict):
+        return {k: _redact_strings(v) for k, v in node.items()}
+    return node
+
+
 def _redact_node(node: Any) -> Any:
     if isinstance(node, str):
         return redactor.redact(node)
@@ -75,18 +89,61 @@ def _redact_node(node: Any) -> Any:
         out = dict(node)
         for key in _CONTENT_KEYS:
             if key in out:
-                out[key] = _redact_node(out[key])
+                walk = _redact_strings if key == "input" else _redact_node
+                out[key] = walk(out[key])
         return out
     return node
 
 
+class RedactionShapeError(Exception):
+    """Redaction changed the request's structure; it must not be forwarded."""
+
+
+def _shape(payload: Any) -> tuple | None:
+    """Structural fingerprint: message count, block count, tool ids in order.
+
+    None when the body is not a messages request (nothing to compare).
+    """
+    if not isinstance(payload, dict) or not isinstance(payload.get("messages"), list):
+        return None
+    blocks = 0
+    ids: list[tuple[str, Any]] = []
+    for msg in payload["messages"]:
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if not isinstance(content, list):
+            blocks += 1
+            continue
+        blocks += len(content)
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use":
+                ids.append(("use", block.get("id")))
+            elif block.get("type") == "tool_result":
+                ids.append(("result", block.get("tool_use_id")))
+    return (len(payload["messages"]), blocks, ids)
+
+
 def _redact_body(body: bytes) -> bytes:
-    """Regex floor on the raw body, then OPF over parsed message content."""
+    """Regex floor on the raw body, then OPF over parsed message content.
+
+    Invariant: redaction never changes the *shape* of a request — message
+    and block counts, tool_use/tool_result ids. A pattern that spans JSON
+    string boundaries can delete whole blocks while leaving valid JSON
+    (the API then rejects the orphaned tool_result). If the shape differs,
+    raise rather than forward: a mangled conversation is never right, and
+    the only other option is forwarding unredacted.
+    """
     try:
         text = body.decode("utf-8")
     except UnicodeDecodeError:
         return body
+    try:
+        before = _shape(json.loads(text))
+    except ValueError:
+        before = None
     text = redactor.regex_redact(text)
+    payload: Any = None
     try:
         payload = json.loads(text)
         if isinstance(payload, dict):
@@ -97,7 +154,23 @@ def _redact_body(body: bytes) -> bytes:
         text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     except Exception as exc:  # noqa: BLE001 - regex floor already applied
         print(f"  ! OPF pass skipped: {exc}", file=sys.stderr, flush=True)
+    if before is not None:
+        after = _shape(payload)
+        if after != before:
+            raise RedactionShapeError(
+                "redaction changed message structure "
+                f"(messages/blocks/tool-ids before={before[:2]} after="
+                f"{after[:2] if after else 'unparseable'})"
+            )
     return text.encode("utf-8")
+
+
+def _error_response(status: int, message: str) -> JSONResponse:
+    """Anthropic-shaped error body so SDK clients surface `message` as is."""
+    return JSONResponse(
+        {"type": "error", "error": {"type": "api_error", "message": message}},
+        status_code=status,
+    )
 
 
 def _restore_node(node: Any) -> Any:
@@ -147,7 +220,11 @@ async def proxy(request: Request, path: str) -> Response:
     body = await request.body()
     stats_before = dict(redactor.stats)
     t0 = time.perf_counter()
-    scrubbed = _redact_body(body) if body else body
+    try:
+        scrubbed = _redact_body(body) if body else body
+    except RedactionShapeError as exc:
+        print(f"{request.method} /{path} {len(body)}b | REFUSED: {exc}", flush=True)
+        return _error_response(500, f"redact-proxy refused to forward: {exc}")
     redact_ms = (time.perf_counter() - t0) * 1000
     cached = redactor.stats["cached"] - stats_before["cached"]
     scanned = redactor.stats["scanned"] - stats_before["scanned"]
@@ -164,10 +241,22 @@ async def proxy(request: Request, path: str) -> Response:
         url += f"?{request.url.query}"
 
     t1 = time.perf_counter()
-    upstream = await client.send(
-        client.build_request(request.method, url, headers=headers, content=scrubbed),
-        stream=True,
-    )
+    try:
+        upstream = await client.send(
+            client.build_request(
+                request.method, url, headers=headers, content=scrubbed
+            ),
+            stream=True,
+        )
+    except httpx.HTTPError as exc:
+        print(
+            f"{request.method} /{path} {len(body)}b{redacted_flag} | "
+            f"upstream unreachable: {type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        return _error_response(
+            502, f"redact-proxy: upstream {UPSTREAM} unreachable ({exc})"
+        )
     ttfb_ms = (time.perf_counter() - t1) * 1000
     print(
         f"{request.method} /{path} {len(body)}b{redacted_flag} | "

@@ -49,7 +49,12 @@ source ~/Code/llm-redact-proxy/claude-wrapper.zsh
   the same secret always redacts identically, so prompt caching survives
   and the model can reason about "that token" without seeing it.
 - **Incremental scanning**: results are cached per content block, so only
-  the new tail of each request pays OPF inference (~5–30 ms).
+  the new tail of each request pays OPF inference (cache hits are
+  milliseconds; cold text costs roughly 0.7 s per 6 KB on M-series).
+- **Refuses rather than mangles**: if redaction ever changes a request's
+  structure (message/block counts, tool ids) the proxy returns a clear
+  error instead of forwarding — and a clear 502 when the upstream is
+  unreachable.
 - **Fail-safe layering**: the regex floor runs on raw bytes and cannot
   fail; if the OPF pass errors, the floor still holds.
 - **Nothing sensitive is logged** — categories and counts only.
@@ -93,6 +98,10 @@ are not restored.
   100% (see [the benchmarks](https://github.com/CupOfGeo/opf-benchmarks-geo)).
   The regex floor covers known token formats; novel secret shapes in prose
   can still slip through.
+- Long single-line texts (minified JSON, base64) are hard-split into
+  ≤6 KB pieces for the model; a freeform secret straddling a cut can be
+  missed by OPF (known token formats are unaffected — the regex floor
+  sees the whole text).
 - The raw secret does reach the local Claude Code process — it is scrubbed
   from the copy sent to the API. The model may visibly see placeholders.
 - Env-based `ANTHROPIC_BASE_URL` can change how the CLI picks its auth

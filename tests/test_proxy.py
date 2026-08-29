@@ -192,3 +192,99 @@ async def test_sse_awareness_mode_byte_identical(
         "/v1/messages", json=message_body(f"my token {GH_TOKEN}")
     )
     assert resp.content == events
+
+
+def flag_pipe(needle: str):
+    """Fake OPF pipe flagging every occurrence of `needle`."""
+
+    def pipe(chunk: str):
+        return [
+            {"entity_group": "secret", "start": i, "end": i + len(needle)}
+            for i in range(len(chunk))
+            if chunk.startswith(needle, i)
+        ]
+
+    return pipe
+
+
+def compact(body: dict) -> dict:
+    """kwargs posting `body` in the SDK's compact wire format."""
+    return {
+        "content": json.dumps(body, separators=(",", ":")),
+        "headers": {"content-type": "application/json"},
+    }
+
+
+TOOL_USE = {"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {}}
+
+
+async def test_tool_use_input_strings_scanned_by_opf(proxy_client, upstream) -> None:
+    from redact_proxy import server
+
+    server.redactor._pipe = flag_pipe("hunter2")
+    block = TOOL_USE | {
+        "input": {
+            "command": "echo hunter2 > creds.txt",
+            "args": ["hunter2"],
+            "nested": {"k": "hunter2"},
+        }
+    }
+    body = {"model": "m", "messages": [{"role": "assistant", "content": [block]}]}
+    await proxy_client.post("/v1/messages", json=body)
+    sent = json.loads(upstream.requests[0].content)["messages"][0]["content"][0]
+    assert "hunter2" not in json.dumps(sent["input"])
+    assert set(sent["input"]) == {"command", "args", "nested"}  # keys untouched
+    assert sent["id"] == "toolu_1" and sent["name"] == "Bash"
+
+
+async def test_structure_change_is_refused(proxy_client, upstream, monkeypatch) -> None:
+    from redact_proxy import server
+
+    def eats_a_block(text: str) -> str:  # a hypothetical boundary-spanning rule
+        return text.replace(json.dumps(TOOL_USE, separators=(",", ":")) + ",", "")
+
+    monkeypatch.setattr(server.redactor, "regex_redact", eats_a_block)
+    body = {
+        "model": "m",
+        "messages": [
+            {"role": "assistant", "content": [TOOL_USE, {"type": "text", "text": "x"}]}
+        ],
+    }
+    resp = await proxy_client.post("/v1/messages", **compact(body))
+    assert resp.status_code == 500
+    assert "structure" in resp.json()["error"]["message"]
+    assert upstream.requests == []  # never forwarded
+
+
+async def test_broken_json_after_redaction_is_refused(
+    proxy_client, upstream, monkeypatch
+) -> None:
+    from redact_proxy import server
+
+    monkeypatch.setattr(server.redactor, "regex_redact", lambda text: text + "}")
+    resp = await proxy_client.post("/v1/messages", json=message_body("hi"))
+    assert resp.status_code == 500
+    assert upstream.requests == []
+
+
+async def test_non_messages_body_skips_shape_check(proxy_client, upstream) -> None:
+    resp = await proxy_client.post("/v1/complete", json={"prompt": "hi"})
+    assert resp.status_code == 200
+    assert len(upstream.requests) == 1
+
+
+async def test_upstream_unreachable_is_clean_502(
+    proxy_client, upstream, monkeypatch
+) -> None:
+    from redact_proxy import server
+
+    def refuse(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    monkeypatch.setattr(
+        server, "client", httpx.AsyncClient(transport=httpx.MockTransport(refuse))
+    )
+    resp = await proxy_client.post("/v1/messages", json=message_body("hi"))
+    assert resp.status_code == 502
+    err = resp.json()["error"]
+    assert err["type"] == "api_error" and "unreachable" in err["message"]

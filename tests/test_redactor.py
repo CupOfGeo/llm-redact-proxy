@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from redact_proxy.redactor import CHUNK_CHARS, Redactor, _placeholder
+from redact_proxy.redactor import CHUNK_CHARS, Redactor, _chunks, _placeholder
 
 GH_TOKEN = "ghp_" + "A" * 36
 GH_PLACEHOLDER = _placeholder("secret", GH_TOKEN)
@@ -143,3 +143,28 @@ def test_cache_only_clear_keeps_restore_working(redactor: Redactor) -> None:
     out = redactor.redact(original)
     redactor._cache.clear()  # the _CACHE_MAX path clears the cache alone
     assert redactor.restore(out) == original
+
+
+def test_hard_split_long_line_prefers_whitespace() -> None:
+    text = ("word " * (CHUNK_CHARS // 5 * 7)).strip()  # one ~7-cap line
+    chunks = _chunks(text)
+    assert "".join(chunks) == text
+    assert len(chunks) >= 7
+    assert max(map(len, chunks)) <= CHUNK_CHARS
+    assert all(c.endswith(" ") for c in chunks[:-1])  # cut after whitespace
+
+
+def test_hard_split_without_whitespace_cuts_at_cap() -> None:
+    text = "x" * (CHUNK_CHARS * 3 + 10)
+    chunks = _chunks(text)
+    assert "".join(chunks) == text
+    assert [len(c) for c in chunks] == [CHUNK_CHARS] * 3 + [10]
+
+
+def test_hard_split_offsets_still_correct() -> None:
+    r = Redactor()
+    r._pipe = span_pipe("hunter2")
+    filler = "y" * (CHUNK_CHARS * 2 + 50)  # a single enormous line
+    out = r.redact(filler + " the password is hunter2 ok")
+    assert "hunter2" not in out
+    assert out.startswith(filler)
