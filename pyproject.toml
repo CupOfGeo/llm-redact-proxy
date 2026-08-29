@@ -22,3 +22,12 @@ llm-redact-proxy = "redact_proxy.server:main"
 
 [tool.setuptools.packages.find]
 include = ["redact_proxy*"]
+
+[dependency-groups]
+dev = ["pytest", "pytest-asyncio", "pre-commit"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.ruff.lint]
+extend-select = ["E402"]

@@ -44,3 +44,6 @@ proxy-uninstall:
     launchctl bootout "gui/$(id -u)/com.llm.redact-proxy" 2>/dev/null || true
     rm -f "$HOME/Library/LaunchAgents/com.llm.redact-proxy.plist"
     @echo "Uninstalled."
+
+test:
+    uv run pytest -q
