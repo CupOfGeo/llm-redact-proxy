@@ -108,9 +108,14 @@ that bothers you.
 
 ## Design notes
 
-- **Deterministic placeholders** (`⟨REDACTED:secret:a1b2c3⟩`, hash-keyed):
-  the same secret always redacts identically, so prompt caching survives
-  and the model can reason about "that token" without seeing it.
+- **Deterministic, keyed placeholders** (`⟨REDACTED:secret:3f9c01d2ab47⟩`):
+  the digest is a keyed hash (BLAKE2b, 48 bits, key generated per install
+  and stored beside the config). Same secret → same placeholder, so prompt
+  caching survives and the model can reason about "that token" without
+  seeing it — while the API side cannot precompute digests, so a guessable
+  password's placeholder is not a dictionary filter, and two installs never
+  produce linkable placeholders. What the cloud learns is equality only:
+  "this secret equals that one".
 - **Incremental scanning**: results are cached per content block, so only
   the new tail of each request pays OPF inference (cache hits are
   milliseconds; cold text costs roughly 0.7 s per 6 KB on M-series).

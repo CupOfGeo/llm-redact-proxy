@@ -11,6 +11,16 @@ call time, so monkeypatching them needs a zero-line production diff.
 
 from __future__ import annotations
 
+import os
+import tempfile
+
+# Isolate the keyed placeholder hash from the developer's real install key.
+# Must happen at import time, before redact_proxy.redactor is imported
+# anywhere: test modules compute placeholders in their module bodies.
+os.environ["OPF_PROXY_KEY_FILE"] = os.path.join(
+    tempfile.mkdtemp(prefix="redact-proxy-test-"), "install.key"
+)
+
 import httpx
 import pytest
 

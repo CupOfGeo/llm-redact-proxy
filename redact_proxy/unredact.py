@@ -37,7 +37,7 @@ MAX_PLACEHOLDER_LEN = 64
 _OPEN, _CLOSE = "⟨", "⟩"
 _ESC_OPEN = r"\\u27[eE]8"
 _ESC_CLOSE = r"\\u27[eE]9"
-_BODY = r"REDACTED:([a-z0-9_]+):([0-9a-f]{6})"
+_BODY = r"REDACTED:([a-z0-9_]+):([0-9a-f]{12})"
 
 _PLAIN_RE = re.compile(_OPEN + _BODY + _CLOSE)
 _FRAG_RE = re.compile(f"(?:{_OPEN}|{_ESC_OPEN}){_BODY}(?:{_CLOSE}|{_ESC_CLOSE})")
@@ -59,7 +59,7 @@ _PARTIAL_PLAIN_RE = re.compile(
     _OPEN
     + "(?:"
     + _prefixes("REDACTED:")
-    + "|REDACTED:[a-z0-9_]+(?::[0-9a-f]{0,6})?"
+    + "|REDACTED:[a-z0-9_]+(?::[0-9a-f]{0,12})?"
     + ")$"
 )
 _PARTIAL_FRAG_RE = re.compile(
@@ -68,7 +68,7 @@ _PARTIAL_FRAG_RE = re.compile(
     + "(?:"
     + _prefixes("REDACTED:")
     + "|REDACTED:[a-z0-9_]+"
-    + f"(?::(?:[0-9a-f]{{0,5}}|[0-9a-f]{{6}}(?:{_ESC_PARTIAL})?))?"
+    + f"(?::(?:[0-9a-f]{{0,11}}|[0-9a-f]{{12}}(?:{_ESC_PARTIAL})?))?"
     + ")"
     + f"|{_ESC_PARTIAL}"
     + ")$"

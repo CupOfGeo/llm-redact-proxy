@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "llm-redact-proxy"
-version = "0.2.1"
+version = "0.3.0"
 description = "Local PII/secret-redacting proxy for LLM APIs. Two layers: a gitleaks-derived regex floor plus the MLX 8-bit OpenAI Privacy Filter. Scrubs outbound requests before they leave your machine."
 readme = "README.md"
 license = { text = "MIT" }

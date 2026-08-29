@@ -117,7 +117,7 @@ def test_restore_unknown_and_malformed_untouched(redactor: Redactor) -> None:
     unknown = _placeholder("secret", "never-recorded-value")
     assert redactor.restore(unknown) == unknown
     for not_a_placeholder in [
-        "⟨REDACTED:secret:ABCDEF⟩",  # uppercase hex: outside the grammar
+        "⟨REDACTED:secret:ABCDEFABCDEF⟩",  # uppercase hex: outside the grammar
         "⟨REDACTED:secret:abc12⟩",  # hash too short
         "⟨REDACTED:⟩",
     ]:
