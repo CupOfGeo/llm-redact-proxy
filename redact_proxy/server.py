@@ -322,8 +322,20 @@ async def health() -> dict:
     }
 
 
+# Endpoints served here. A wrong method (`GET /restore`) must not fall
+# through to upstream: the failure then looks like a TLS/connect problem
+# on the provider path, which is how issue #1 misread it.
+_LOCAL_ENDPOINTS = {"restore": "POST", "health": "GET"}
+
+
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
 async def proxy(request: Request, path: str) -> Response:
+    if path in _LOCAL_ENDPOINTS:
+        return _error_response(
+            405,
+            f"redact-proxy: /{path} is served locally and takes "
+            f"{_LOCAL_ENDPOINTS[path]} only (never forwarded upstream)",
+        )
     # Fail closed while the model isn't available: forwarding with only the
     # regex floor would silently weaken the protection the user configured.
     state = _model_state()

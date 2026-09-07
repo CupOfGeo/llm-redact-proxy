@@ -51,13 +51,27 @@ def test_clean_input_restored(restore_ok) -> None:
     assert restore_ok[0]["tool"] == "Bash"
 
 
-def test_unknown_placeholder_only_passes_through(monkeypatch) -> None:
+def test_unknown_placeholder_warns_without_rewriting(monkeypatch) -> None:
     monkeypatch.setattr(
         hook,
         "_restore_request",
         lambda url, body: {"input": body["input"], "restored": 0, "unknown": 1},
     )
-    assert hook.pre_tool_use(payload(f"echo {PH}")) is None
+    out = hook.pre_tool_use(payload(f"echo {PH}"))
+    assert out is not None and "NOT restored" in out["systemMessage"]
+    assert "hookSpecificOutput" not in out  # nothing to rewrite, no decision
+
+
+def test_mixed_known_and_unknown_restores_and_warns(monkeypatch) -> None:
+    monkeypatch.setattr(
+        hook,
+        "_restore_request",
+        lambda url, body: {"input": {"command": "x"}, "restored": 1, "unknown": 1},
+    )
+    out = hook.pre_tool_use(payload(f"echo {PH} {PH}"))
+    assert out is not None
+    assert out["hookSpecificOutput"]["updatedInput"] == {"command": "x"}
+    assert "1 placeholder" in out["systemMessage"]
 
 
 @pytest.mark.parametrize(

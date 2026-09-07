@@ -159,14 +159,21 @@ def pre_tool_use(payload: dict) -> dict | None:
                 "in this tool call (run: redact-proxy status)"
             )
         }
-    if not result.get("restored"):
-        return None  # only unknown placeholders: nothing to rewrite
-    return {
-        "hookSpecificOutput": {
+    out: dict[str, Any] = {}
+    if result.get("unknown"):
+        # Typically minted before a proxy restart (the map is memory-only).
+        # Say so: a command run on a placeholder "succeeds" and no-ops.
+        out["systemMessage"] = (
+            f"redact-proxy: {result['unknown']} placeholder(s) in this tool "
+            "call are unknown to the proxy (minted before a restart?) and were "
+            "NOT restored — the command will run on the placeholder text"
+        )
+    if result.get("restored"):
+        out["hookSpecificOutput"] = {
             "hookEventName": "PreToolUse",
             "updatedInput": result["input"],
         }
-    }
+    return out or None
 
 
 def session_start(_payload: dict) -> dict | None:

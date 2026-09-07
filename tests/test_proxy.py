@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 import httpx
+import pytest
 
 from redact_proxy.redactor import _placeholder
 
@@ -30,6 +31,18 @@ async def test_body_scrubbed_before_upstream(proxy_client, upstream) -> None:
     # Still valid JSON with the surrounding structure intact.
     payload = json.loads(sent)
     assert payload["messages"][0]["content"][0]["text"].endswith(GH_PLACEHOLDER)
+
+
+@pytest.mark.parametrize("method,path", [("GET", "/restore"), ("POST", "/health")])
+async def test_local_endpoint_wrong_method_is_never_proxied(
+    proxy_client, upstream, method, path
+) -> None:
+    # Issue #1: `GET /restore` fell through to the catch-all and was forwarded
+    # upstream, surfacing as a TLS/connect failure on the provider path.
+    resp = await proxy_client.request(method, path)
+    assert resp.status_code == 405
+    assert "served locally" in resp.json()["error"]["message"]
+    assert upstream.requests == []
 
 
 async def test_health_is_never_proxied(proxy_client, upstream) -> None:
