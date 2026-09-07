@@ -6,6 +6,8 @@ in source (they'd trip secret scanners, including this proxy itself).
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from redact_proxy.redactor import Redactor, _placeholder
@@ -79,3 +81,30 @@ def test_positive(floor: Redactor, name: str) -> None:
 @pytest.mark.parametrize("text", NEGATIVE)
 def test_negative(floor: Redactor, text: str) -> None:
     assert floor.regex_redact(text) == text
+
+
+@pytest.mark.parametrize("escape", ["\\n", "\\t", "\\r"])
+def test_match_after_json_escape_keeps_escape(floor: Redactor, escape: str) -> None:
+    """Regression: over raw JSON the URL-credential pattern can start on the
+    letter of an escape (`\\n` + `https://u:p@h`), leaving a dangling
+    backslash — unparseable JSON, refused on every retry (2026-09-07)."""
+    creds = "https://user:hunter2@example.com"
+    raw = '{"content": "origin' + escape + creds + '/repo"}'
+    out = floor.regex_redact(raw)
+    parsed = json.loads(out)  # must still be valid JSON
+    assert "hunter2" not in out
+    assert parsed["content"].startswith(
+        "origin" + escape.encode().decode("unicode_escape")
+    )
+    assert floor.restore(out) == raw  # round trip exact
+
+
+def test_match_after_literal_backslash_is_not_an_escape(floor: Redactor) -> None:
+    creds = "https://user:hunter2@example.com"
+    raw = (
+        '{"content": "C:\\\\' + creds + '"}'
+    )  # `\\\\` on the wire = one literal backslash
+    out = floor.regex_redact(raw)
+    json.loads(out)
+    assert "hunter2" not in out and out.count("\\\\") == 1
+    assert floor.restore(out) == raw

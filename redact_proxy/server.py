@@ -345,7 +345,9 @@ async def proxy(request: Request, path: str) -> Response:
             bytes=len(body),
             reason=str(exc),
         )
-        return _error_response(500, f"redact-proxy refused to forward: {exc}")
+        # 400, not 500: the failure is deterministic for this conversation,
+        # so the SDK's 5xx retry loop would only replay it with backoff.
+        return _error_response(400, f"redact-proxy refused to forward: {exc}")
     redact_ms = (time.perf_counter() - t0) * 1000
     cached = redactor.stats["cached"] - stats_before["cached"]
     scanned = redactor.stats["scanned"] - stats_before["scanned"]

@@ -220,7 +220,23 @@ class Redactor:
         """Layer 1 only. Safe to run on raw request bytes."""
 
         def replace(m: re.Match) -> str:
-            return self._record("secret", m.group(), "regex")
+            value, start, src = m.group(), m.start(), m.string
+            # Over raw JSON a match can begin on the letter of an escape
+            # (`\n`, `\t`, ...) when a token follows a newline or tab —
+            # the URL-credential pattern starts on any letter. Swallowing
+            # that letter leaves a dangling backslash: unparseable JSON,
+            # which the shape guard then refuses on every retry. An odd
+            # run of backslashes before the match means it is an escape:
+            # keep the escape (5 chars for `\uXXXX`), redact the rest.
+            run = start
+            while run > 0 and src[run - 1] == "\\":
+                run -= 1
+            if (start - run) % 2 == 1:
+                keep = 5 if value[0] == "u" else 1
+                if len(value) <= keep:
+                    return value
+                return value[:keep] + self._record("secret", value[keep:], "regex")
+            return self._record("secret", value, "regex")
 
         for pattern in TOKEN_PATTERNS:
             text = pattern.sub(replace, text)

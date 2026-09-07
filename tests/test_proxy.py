@@ -251,7 +251,7 @@ async def test_structure_change_is_refused(proxy_client, upstream, monkeypatch) 
         ],
     }
     resp = await proxy_client.post("/v1/messages", **compact(body))
-    assert resp.status_code == 500
+    assert resp.status_code == 400
     assert "structure" in resp.json()["error"]["message"]
     assert upstream.requests == []  # never forwarded
 
@@ -263,7 +263,7 @@ async def test_broken_json_after_redaction_is_refused(
 
     monkeypatch.setattr(server.redactor, "regex_redact", lambda text: text + "}")
     resp = await proxy_client.post("/v1/messages", json=message_body("hi"))
-    assert resp.status_code == 500
+    assert resp.status_code == 400
     assert upstream.requests == []
 
 
